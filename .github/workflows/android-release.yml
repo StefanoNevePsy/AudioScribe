@@ -64,16 +64,19 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build debug APK
+      - name: Build release APK
+        # assembleRelease impacchetta il bundle JS dentro l'APK (app autonoma,
+        # nessun Metro necessario). Firmato con la debug keystore (vedi
+        # buildType release in app/build.gradle): chiave stabile e aggiornabile.
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       - name: Prepare artifact
         run: |
           mkdir -p dist
           # Sanifica il nome (il branch puo contenere '/', non valido nel filename)
           SAFE_TAG=$(printf '%s' "${{ steps.meta.outputs.tag }}" | tr '/' '-')
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
+          cp android/app/build/outputs/apk/release/app-release.apk \
              "dist/AudioScribeGlass-${SAFE_TAG}.apk"
 
       - name: Upload build artifact
