@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Stessa sagoma del foreground in tinta unica: il motore Monet la
+         ricolora in base allo sfondo (themed icons / Material You). -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M46,40 a8,8 0 0 1 16,0 v14 a8,8 0 0 1 -16,0 z" />
+    <path
+        android:strokeColor="#FF000000"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M40,52 a14,14 0 0 0 28,0 M54,66 L54,77 M44,77 L64,77" />
+</vector>
