@@ -71,8 +71,10 @@ jobs:
       - name: Prepare artifact
         run: |
           mkdir -p dist
+          # Sanifica il nome (il branch puo contenere '/', non valido nel filename)
+          SAFE_TAG=$(printf '%s' "${{ steps.meta.outputs.tag }}" | tr '/' '-')
           cp android/app/build/outputs/apk/debug/app-debug.apk \
-             "dist/AudioScribeGlass-${{ steps.meta.outputs.tag }}.apk"
+             "dist/AudioScribeGlass-${SAFE_TAG}.apk"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
