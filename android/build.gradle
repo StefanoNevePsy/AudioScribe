@@ -18,20 +18,14 @@ buildscript {
     }
 }
 
-apply plugin: "com.facebook.react.rootproject"
-
-// Forza compileSdk/buildToolsVersion su tutti i moduli libreria. Alcune
-// librerie React Native piu datate (es. react-native-share-menu) non leggono
-// rootProject.ext.compileSdkVersion e ricadrebbero su un valore troppo basso
-// per compilare sorgenti Java 9+, facendo fallire la build.
-subprojects { subproject ->
-    afterEvaluate {
-        if (subproject.plugins.hasPlugin("com.android.library") ||
-                subproject.plugins.hasPlugin("com.android.application")) {
-            android {
-                compileSdkVersion rootProject.ext.compileSdkVersion
-                buildToolsVersion rootProject.ext.buildToolsVersion
-            }
-        }
-    }
+// Espone le versioni anche come extra properties a livello di progetto, cosi
+// le librerie che le leggono con rootProject.ext.has(...) / safeExtGet le
+// trovano (oltre che dal blocco buildscript sopra).
+ext {
+    buildToolsVersion = "36.0.0"
+    minSdkVersion = 26
+    compileSdkVersion = 36
+    targetSdkVersion = 36
 }
+
+apply plugin: "com.facebook.react.rootproject"
