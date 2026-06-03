@@ -52,14 +52,20 @@ jobs:
       - name: Compute release tag
         id: meta
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            # Tag vX.Y.Z: release versionata permanente
             TAG="${GITHUB_REF_NAME}"
+            TITLE="AudioScribe Glass ${GITHUB_REF_NAME}"
           elif [ -n "${{ github.event.inputs.version }}" ]; then
             TAG="${{ github.event.inputs.version }}"
+            TITLE="AudioScribe Glass ${{ github.event.inputs.version }}"
           else
-            TAG="v1.0.0-build.${{ github.run_number }}"
+            # Build automatica su push: release "latest" sempre aggiornata
+            TAG="latest"
+            TITLE="AudioScribe Glass — ultima build"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
@@ -74,30 +80,33 @@ jobs:
       - name: Prepare artifact
         run: |
           mkdir -p dist
-          # Sanifica il nome (il branch puo contenere '/', non valido nel filename)
-          SAFE_TAG=$(printf '%s' "${{ steps.meta.outputs.tag }}" | tr '/' '-')
+          # Nome file fisso -> link di download stabile per il telefono.
           cp android/app/build/outputs/apk/release/app-release.apk \
-             "dist/AudioScribeGlass-${SAFE_TAG}.apk"
+             dist/AudioScribeGlass.apk
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: AudioScribeGlass-apk
-          path: dist/*.apk
+          path: dist/AudioScribeGlass.apk
 
       - name: Publish GitHub Release
-        # Pubblica una release solo per tag (vX.Y.Z) o avvio manuale.
-        # I push su branch fanno solo build + artifact (per validare).
-        if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+        # Pubblica/aggiorna sempre una Release con l'APK allegato, cosi e
+        # scaricabile direttamente dal browser del telefono (repo pubblico,
+        # nessun login). I push normali aggiornano la release "latest".
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: AudioScribe Glass ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          make_latest: true
+          files: dist/AudioScribeGlass.apk
           body: |
-            APK Android di **AudioScribe Glass** (firmato con debug keystore, architettura arm64-v8a).
+            APK Android di **AudioScribe Glass** (release autonoma con bundle JS incluso, firmata con debug keystore, arm64-v8a).
 
-            - Package: `com.audioscribe.glass` — si installa **accanto** alla versione precedente, senza disinstallare nulla.
-            - Gli aggiornamenti futuri (stessa keystore) si installano sopra a questo.
+            📲 **Download diretto (telefono):**
+            https://github.com/StefanoNevePsy/AudioScribe/releases/latest/download/AudioScribeGlass.apk
 
-            Per installare: scarica l'APK sul telefono e aprilo (consenti "installa da sorgenti sconosciute").
-          files: dist/*.apk
+            - Package `com.audioscribe.glass`: si installa **accanto** alla versione precedente.
+            - Gli aggiornamenti futuri si installano sopra a questo (stessa keystore).
+
+            Per installare: apri il link sul telefono, scarica l'APK e aprilo (consenti "installa da sorgenti sconosciute").
