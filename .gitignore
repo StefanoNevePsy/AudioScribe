@@ -1,0 +1,34 @@
+# OSX
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Metro
+.metro-health-check*
+metro.config.js.bak
+
+# Watchman
+.watchmanconfig
+
+# Android / Gradle build artifacts
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/.cxx/
+/android/local.properties
+*.iml
+.idea/
+.kotlin/
+
+# iOS
+/ios/build/
+/ios/Pods/
+*.hprof
+
+# Misc
+.env
+*.log
+coverage/

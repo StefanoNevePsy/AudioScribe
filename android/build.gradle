@@ -1,0 +1,31 @@
+buildscript {
+    ext {
+        buildToolsVersion = "36.0.0"
+        minSdkVersion = 26
+        compileSdkVersion = 36
+        targetSdkVersion = 36
+        ndkVersion = "27.1.12297006"
+        kotlinVersion = "2.1.20"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+// Espone le versioni anche come extra properties a livello di progetto, cosi
+// le librerie che le leggono con rootProject.ext.has(...) / safeExtGet le
+// trovano (oltre che dal blocco buildscript sopra).
+ext {
+    buildToolsVersion = "36.0.0"
+    minSdkVersion = 26
+    compileSdkVersion = 36
+    targetSdkVersion = 36
+}
+
+apply plugin: "com.facebook.react.rootproject"

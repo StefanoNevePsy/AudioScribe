@@ -1,0 +1,100 @@
+name: Android Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag della release (es. v1.0.0). Se vuoto ne genero uno automaticamente."
+        required: false
+  push:
+    branches:
+      # Build di validazione sui branch principali e di sviluppo.
+      - main
+      - master
+      - claude/sleepy-gauss-K12OD
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK and CMake
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Compute release tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG="v1.0.0-build.${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p dist
+          # Sanifica il nome (il branch puo contenere '/', non valido nel filename)
+          SAFE_TAG=$(printf '%s' "${{ steps.meta.outputs.tag }}" | tr '/' '-')
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "dist/AudioScribeGlass-${SAFE_TAG}.apk"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioScribeGlass-apk
+          path: dist/*.apk
+
+      - name: Publish GitHub Release
+        # Pubblica una release solo per tag (vX.Y.Z) o avvio manuale.
+        # I push su branch fanno solo build + artifact (per validare).
+        if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: AudioScribe Glass ${{ steps.meta.outputs.tag }}
+          body: |
+            APK Android di **AudioScribe Glass** (firmato con debug keystore, architettura arm64-v8a).
+
+            - Package: `com.audioscribe.glass` — si installa **accanto** alla versione precedente, senza disinstallare nulla.
+            - Gli aggiornamenti futuri (stessa keystore) si installano sopra a questo.
+
+            Per installare: scarica l'APK sul telefono e aprilo (consenti "installa da sorgenti sconosciute").
+          files: dist/*.apk
