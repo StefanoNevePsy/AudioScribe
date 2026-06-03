@@ -1,0 +1,25 @@
+# OSX
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Metro
+.metro-health-check*
+metro.config.js.bak
+
+# Watchman
+.watchmanconfig
+
+# Build artifacts
+/android/app/build/
+/ios/build/
+/ios/Pods/
+*.hprof
+
+# Misc
+.env
+*.log
+coverage/
