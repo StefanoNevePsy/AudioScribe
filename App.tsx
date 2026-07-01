@@ -13,7 +13,9 @@ import { BlurView } from '@react-native-community/blur';
 
 // --- CONFIGURAZIONE ---
 const DEFAULT_WHISPER_MODEL = 'whisper-large-v3';
-const DEFAULT_LLAMA_MODEL = 'llama-3.3-70b-versatile';
+// llama-3.3-70b-versatile viene dismesso da Groq il 16/08/2026.
+// Sostituito con il modello consigliato openai/gpt-oss-120b.
+const DEFAULT_LLAMA_MODEL = 'openai/gpt-oss-120b';
 const DEFAULT_API_KEY = 'INSERISCI_QUI_LA_TUA_CHIAVE_GROQ';
 
 // =====================================================================
