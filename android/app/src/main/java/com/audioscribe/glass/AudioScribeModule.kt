@@ -159,11 +159,11 @@ class AudioScribeModule(reactContext: ReactApplicationContext) :
   // ------------------------------------------------------------------
   @ReactMethod
   fun consumeLaunchAction(promise: Promise) {
-    val activity = currentActivity
-    val action = activity?.intent?.action
-    if (activity != null && action == ACTION_TRANSCRIBE_LATEST) {
+    val intent = reactApplicationContext.currentActivity?.intent
+    val action = intent?.action
+    if (intent != null && action == ACTION_TRANSCRIBE_LATEST) {
       // Consuma l'azione, cosi non si ripete al prossimo ritorno in foreground.
-      activity.intent.action = Intent.ACTION_MAIN
+      intent.setAction(Intent.ACTION_MAIN)
     }
     promise.resolve(action)
   }
