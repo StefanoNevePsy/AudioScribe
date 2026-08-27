@@ -14,8 +14,9 @@ class MainApplication : Application(), ReactApplication {
       context = applicationContext,
       packageList =
         PackageList(this).packages.apply {
-          // Packages that cannot be autolinked yet can be added manually here, for example:
-          // add(MyReactNativePackage())
+          // Modulo locale che legge l'audio condiviso (content://) in base64,
+          // necessario per le API che vogliono l'audio inline (Gemini).
+          add(AudioBase64Package())
         },
     )
   }

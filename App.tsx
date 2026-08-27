@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, FlatList, Alert, useColorScheme,
-  StatusBar, Animated, Easing,
+  StatusBar, Animated, Easing, NativeModules,
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import ShareMenu from 'react-native-share-menu';
@@ -17,6 +17,69 @@ const DEFAULT_WHISPER_MODEL = 'whisper-large-v3';
 // Sostituito con il modello consigliato openai/gpt-oss-120b.
 const DEFAULT_LLAMA_MODEL = 'openai/gpt-oss-120b';
 const DEFAULT_API_KEY = 'INSERISCI_QUI_LA_TUA_CHIAVE_GROQ';
+
+// Gemini 3.5 Transcribe: trascrive E formatta in una sola chiamata.
+const DEFAULT_GEMINI_MODEL = 'gemini-3.5-transcribe';
+const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+
+const GEMINI_PROMPT =
+  'Trascrivi fedelmente questo messaggio vocale in italiano. ' +
+  'Restituisci solo il testo trascritto, con punteggiatura, maiuscole e ' +
+  'diviso in paragrafi. Non aggiungere commenti, titoli o introduzioni.';
+
+// Tipi MIME audio accettati da Gemini.
+const GEMINI_MIME_TYPES = [
+  'audio/wav', 'audio/mp3', 'audio/aiff', 'audio/aac', 'audio/ogg', 'audio/flac',
+];
+
+// WhatsApp puo dichiarare tipi non standard (audio/opus, octet-stream...):
+// li normalizziamo su un tipo che Gemini accetta.
+const toGeminiMime = (declared?: string, uri?: string) => {
+  const raw = (declared || '').split(';')[0].trim().toLowerCase();
+  if (GEMINI_MIME_TYPES.includes(raw)) return raw;
+  const aliases: Record<string, string> = {
+    'audio/mpeg': 'audio/mp3',
+    'audio/opus': 'audio/ogg',
+    'audio/vorbis': 'audio/ogg',
+    'audio/x-wav': 'audio/wav',
+    'audio/wave': 'audio/wav',
+    'audio/mp4': 'audio/aac',
+    'audio/m4a': 'audio/aac',
+    'audio/x-m4a': 'audio/aac',
+  };
+  if (aliases[raw]) return aliases[raw];
+
+  const ext = (uri || '').split('?')[0].split('.').pop()?.toLowerCase() || '';
+  const byExt: Record<string, string> = {
+    ogg: 'audio/ogg', opus: 'audio/ogg', mp3: 'audio/mp3', wav: 'audio/wav',
+    flac: 'audio/flac', aac: 'audio/aac', m4a: 'audio/aac', aiff: 'audio/aiff',
+  };
+  // I vocali WhatsApp sono ogg/opus: default sensato.
+  return byExt[ext] || 'audio/ogg';
+};
+
+// La risposta di /v1beta/interactions espone il testo in steps[].content[].
+// Restiamo tolleranti su piu forme per non rompere se l'API evolve.
+const extractGeminiText = (data: any): string => {
+  if (!data) return '';
+  if (typeof data.output_text === 'string' && data.output_text.trim()) {
+    return data.output_text.trim();
+  }
+  const fromSteps = (data.steps || [])
+    .flatMap((s: any) => s?.content || [])
+    .map((c: any) => (typeof c?.text === 'string' ? c.text : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  if (fromSteps) return fromSteps;
+
+  return (data.candidates || [])
+    .flatMap((c: any) => c?.content?.parts || [])
+    .map((p: any) => (typeof p?.text === 'string' ? p.text : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+};
 
 // =====================================================================
 //  PALETTE LIQUID GLASS
@@ -137,9 +200,12 @@ const AppInner = () => {
   const [viewMode, setViewMode] = useState<'history' | 'reader' | 'overlay' | 'settings'>('history');
 
   // --- STATI IMPOSTAZIONI ---
+  const [provider, setProvider] = useState<'groq' | 'gemini'>('groq');
   const [apiKey, setApiKey] = useState(DEFAULT_API_KEY);
   const [whisperModel, setWhisperModel] = useState(DEFAULT_WHISPER_MODEL);
   const [llamaModel, setLlamaModel] = useState(DEFAULT_LLAMA_MODEL);
+  const [geminiKey, setGeminiKey] = useState('');
+  const [geminiModel, setGeminiModel] = useState(DEFAULT_GEMINI_MODEL);
 
   // Evita di sovrascrivere lo storage prima del caricamento iniziale
   const historyLoaded = useRef(false);
@@ -150,7 +216,7 @@ const AppInner = () => {
     const handleShare = (item: any) => {
       if (item && item.data) {
         setViewMode('overlay');
-        loadSettingsAndProcess(item.data);
+        loadSettingsAndProcess(item.data, item.mimeType);
       }
     };
     ShareMenu.getInitialShare(handleShare);
@@ -177,6 +243,12 @@ const AppInner = () => {
       if (savedWhisper) setWhisperModel(savedWhisper);
       const savedLlama = await AsyncStorage.getItem('@llama_model');
       if (savedLlama) setLlamaModel(savedLlama);
+      const savedProvider = await AsyncStorage.getItem('@provider');
+      if (savedProvider === 'gemini' || savedProvider === 'groq') setProvider(savedProvider);
+      const savedGeminiKey = await AsyncStorage.getItem('@gemini_key');
+      if (savedGeminiKey) setGeminiKey(savedGeminiKey);
+      const savedGeminiModel = await AsyncStorage.getItem('@gemini_model');
+      if (savedGeminiModel) setGeminiModel(savedGeminiModel);
     } catch (e) {
       // ignora
     } finally {
@@ -184,8 +256,18 @@ const AppInner = () => {
     }
   };
 
-  const loadSettingsAndProcess = async (uri: string) => {
+  // Legge le impostazioni salvate (non lo stato, che potrebbe non essere
+  // ancora popolato quando l'app viene aperta dalla condivisione) e instrada
+  // verso il motore scelto.
+  const loadSettingsAndProcess = async (uri: string, sharedMime?: string) => {
     try {
+      const savedProvider = await AsyncStorage.getItem('@provider');
+      if ((savedProvider || provider) === 'gemini') {
+        const key = (await AsyncStorage.getItem('@gemini_key')) || geminiKey;
+        const model = (await AsyncStorage.getItem('@gemini_model')) || geminiModel;
+        processWithGemini(uri, key, model, sharedMime);
+        return;
+      }
       const savedKey = await AsyncStorage.getItem('@api_key');
       const savedWhisper = await AsyncStorage.getItem('@whisper_model');
       const savedLlama = await AsyncStorage.getItem('@llama_model');
@@ -196,9 +278,12 @@ const AppInner = () => {
   };
 
   const saveSettings = async () => {
+    await AsyncStorage.setItem('@provider', provider);
     await AsyncStorage.setItem('@api_key', apiKey);
     await AsyncStorage.setItem('@whisper_model', whisperModel);
     await AsyncStorage.setItem('@llama_model', llamaModel);
+    await AsyncStorage.setItem('@gemini_key', geminiKey);
+    await AsyncStorage.setItem('@gemini_model', geminiModel);
     setViewMode('history');
     Alert.alert('Salvataggio', 'Impostazioni aggiornate.');
   };
@@ -206,17 +291,69 @@ const AppInner = () => {
   const resetSettings = () => {
     setWhisperModel(DEFAULT_WHISPER_MODEL);
     setLlamaModel(DEFAULT_LLAMA_MODEL);
+    setGeminiModel(DEFAULT_GEMINI_MODEL);
     Alert.alert('Ripristinato', 'Modelli ripristinati.');
+  };
+
+  const normalizeUri = (uri: string) => {
+    if (!uri.startsWith('file://') && !uri.startsWith('content://')) {
+      return 'file://' + uri;
+    }
+    return uri;
+  };
+
+  const showError = (error: any) => {
+    let errorMsg = error?.message || 'Errore sconosciuto';
+    const apiError = error?.response?.data?.error;
+    if (apiError) errorMsg = typeof apiError === 'string' ? apiError : JSON.stringify(apiError);
+    setTranscription('Errore: ' + errorMsg);
+  };
+
+  // --- MOTORE GEMINI: una sola chiamata, trascrive e formatta insieme ---
+  const processWithGemini = async (
+    uri: string, keyToUse: string, modelToUse: string, sharedMime?: string,
+  ) => {
+    setLoading(true);
+    setTranscription('Lettura audio...');
+    try {
+      if (!keyToUse) {
+        setTranscription('Errore: manca la API key di Gemini. Aprila in Impostazioni.');
+        return;
+      }
+      const cleanUri = normalizeUri(uri);
+      const base64 = await NativeModules.AudioBase64.readAsBase64(cleanUri);
+
+      setTranscription(`Trascrizione con ${modelToUse}...`);
+      const res = await axios.post(
+        GEMINI_ENDPOINT,
+        {
+          model: modelToUse,
+          input: [
+            { type: 'text', text: GEMINI_PROMPT },
+            { type: 'audio', data: base64, mime_type: toGeminiMime(sharedMime, cleanUri) },
+          ],
+        },
+        { headers: { 'x-goog-api-key': keyToUse, 'Content-Type': 'application/json' } },
+      );
+
+      const text = extractGeminiText(res.data);
+      if (!text) {
+        setTranscription('Errore: Gemini non ha restituito testo.');
+        return;
+      }
+      finishProcess(text);
+    } catch (error: any) {
+      showError(error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const processAudio = async (uri: string, keyToUse: string, whisperToUse: string, llamaToUse: string) => {
     setLoading(true);
     setTranscription('Trascrizione in corso...');
     try {
-      let cleanUri = uri;
-      if (!cleanUri.startsWith('file://') && !cleanUri.startsWith('content://')) {
-        cleanUri = 'file://' + cleanUri;
-      }
+      const cleanUri = normalizeUri(uri);
       const fileData: any = { uri: cleanUri, type: 'audio/ogg', name: 'audio.ogg' };
 
       const formData = new FormData();
@@ -243,9 +380,7 @@ const AppInner = () => {
       });
       finishProcess(chatRes.data.choices[0].message.content);
     } catch (error: any) {
-      let errorMsg = error.message;
-      if (error.response && error.response.data && error.response.data.error) errorMsg = JSON.stringify(error.response.data.error);
-      setTranscription('Errore: ' + errorMsg);
+      showError(error);
     } finally {
       setLoading(false);
     }
@@ -298,29 +433,89 @@ const AppInner = () => {
       <AuroraBackground palette={palette} />
       <View style={[styles.centeredOverlay, { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20 }]}>
         <GlassSurface palette={palette} strong style={styles.settingsCard}>
-          <View style={styles.settingsInner}>
+          <ScrollView
+            style={styles.settingsScroll}
+            contentContainerStyle={styles.settingsInner}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
             <Text style={[styles.title, { color: palette.text, marginBottom: 20 }]}>Impostazioni</Text>
 
-            <Text style={[styles.label, { color: palette.subText }]}>API Key Groq</Text>
-            <TextInput
-              style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
-              value={apiKey} onChangeText={setApiKey} placeholder="gsk_..."
-              placeholderTextColor={palette.subText} secureTextEntry
-            />
+            {/* Selettore del motore di trascrizione */}
+            <Text style={[styles.label, { color: palette.subText }]}>Motore</Text>
+            <View style={[styles.segment, { borderColor: palette.glassBorder }]}>
+              {([
+                { id: 'groq' as const, label: 'Groq' },
+                { id: 'gemini' as const, label: 'Gemini' },
+              ]).map(opt => {
+                const active = provider === opt.id;
+                return (
+                  <TouchableOpacity
+                    key={opt.id}
+                    onPress={() => setProvider(opt.id)}
+                    activeOpacity={0.8}
+                    style={[
+                      styles.segmentItem,
+                      active && { backgroundColor: palette.accentSolid },
+                    ]}
+                  >
+                    <Text style={{
+                      color: active ? '#fff' : palette.subText,
+                      fontWeight: '700',
+                      fontSize: 13,
+                    }}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={[styles.hint, { color: palette.subText }]}>
+              {provider === 'groq'
+                ? 'Whisper trascrive, poi un LLM formatta. Due chiamate, piano gratuito.'
+                : 'Gemini 3.5 Transcribe trascrive e formatta in una sola chiamata. Richiede fatturazione attiva su Google AI Studio (~$0,005/min).'}
+            </Text>
 
-            <Text style={[styles.label, { color: palette.subText }]}>Modello Audio</Text>
-            <TextInput
-              style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
-              value={whisperModel} onChangeText={setWhisperModel}
-              placeholderTextColor={palette.subText} autoCapitalize="none"
-            />
+            {provider === 'groq' ? (
+              <>
+                <Text style={[styles.label, { color: palette.subText }]}>API Key Groq</Text>
+                <TextInput
+                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
+                  value={apiKey} onChangeText={setApiKey} placeholder="gsk_..."
+                  placeholderTextColor={palette.subText} secureTextEntry
+                />
 
-            <Text style={[styles.label, { color: palette.subText }]}>Modello Testo</Text>
-            <TextInput
-              style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
-              value={llamaModel} onChangeText={setLlamaModel}
-              placeholderTextColor={palette.subText} autoCapitalize="none"
-            />
+                <Text style={[styles.label, { color: palette.subText }]}>Modello Audio</Text>
+                <TextInput
+                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
+                  value={whisperModel} onChangeText={setWhisperModel}
+                  placeholderTextColor={palette.subText} autoCapitalize="none"
+                />
+
+                <Text style={[styles.label, { color: palette.subText }]}>Modello Testo</Text>
+                <TextInput
+                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
+                  value={llamaModel} onChangeText={setLlamaModel}
+                  placeholderTextColor={palette.subText} autoCapitalize="none"
+                />
+              </>
+            ) : (
+              <>
+                <Text style={[styles.label, { color: palette.subText }]}>API Key Gemini</Text>
+                <TextInput
+                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
+                  value={geminiKey} onChangeText={setGeminiKey} placeholder="AIza..."
+                  placeholderTextColor={palette.subText} secureTextEntry
+                />
+
+                <Text style={[styles.label, { color: palette.subText }]}>Modello Gemini</Text>
+                <TextInput
+                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
+                  value={geminiModel} onChangeText={setGeminiModel}
+                  placeholderTextColor={palette.subText} autoCapitalize="none"
+                />
+              </>
+            )}
 
             <TouchableOpacity onPress={resetSettings} style={{ marginTop: 6, marginBottom: 22 }}>
               <Text style={{ color: palette.accent, textAlign: 'right', fontWeight: '600' }}>Ripristina Default</Text>
@@ -334,7 +529,7 @@ const AppInner = () => {
                 <Text style={styles.primaryButtonText}>Salva</Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </ScrollView>
         </GlassSurface>
       </View>
     </View>
@@ -397,7 +592,10 @@ const AppInner = () => {
           <View>
             <Text style={[styles.brand, { color: palette.text }]}>AudioScribe</Text>
             <Text style={[styles.brandSub, { color: palette.subText }]}>
-              {history.length > 0 ? `${history.length} trascrizion${history.length === 1 ? 'e' : 'i'}` : 'Pronto a trascrivere'}
+              {(history.length > 0
+                ? `${history.length} trascrizion${history.length === 1 ? 'e' : 'i'}`
+                : 'Pronto a trascrivere')
+                + ` · ${provider === 'gemini' ? 'Gemini' : 'Groq'}`}
             </Text>
           </View>
           <View style={styles.headerActions}>
@@ -531,10 +729,14 @@ const styles = StyleSheet.create({
 
   // Settings
   centeredOverlay: { flex: 1, justifyContent: 'center', paddingHorizontal: 18 },
-  settingsCard: { width: '100%' },
+  settingsCard: { width: '100%', maxHeight: '90%' },
+  settingsScroll: { width: '100%' },
   settingsInner: { padding: 24 },
   label: { fontSize: 12, fontWeight: '700', marginTop: 12, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
   input: { padding: 13, borderRadius: 12, fontSize: 16, borderWidth: 1 },
+  hint: { fontSize: 12, lineHeight: 17, marginTop: 8 },
+  segment: { flexDirection: 'row', borderRadius: 12, borderWidth: 1, overflow: 'hidden' },
+  segmentItem: { flex: 1, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
 
   // FAB
   fab: { position: 'absolute', right: 18 },
