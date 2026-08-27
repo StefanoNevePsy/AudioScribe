@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ActivityIndicator, ScrollView, FlatList, Alert, useColorScheme,
-  StatusBar, Animated, Easing, NativeModules,
+  StatusBar, Animated, Easing, NativeModules, AppState, Switch,
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import ShareMenu from 'react-native-share-menu';
@@ -22,10 +22,9 @@ const DEFAULT_API_KEY = 'INSERISCI_QUI_LA_TUA_CHIAVE_GROQ';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.5-transcribe';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
-const GEMINI_PROMPT =
-  'Trascrivi fedelmente questo messaggio vocale in italiano. ' +
-  'Restituisci solo il testo trascritto, con punteggiatura, maiuscole e ' +
-  'diviso in paragrafi. Non aggiungere commenti, titoli o introduzioni.';
+// Modulo nativo locale (lettura base64, ultimo vocale, azione di avvio).
+const Native = NativeModules.AudioScribeNative;
+const ACTION_TRANSCRIBE_LATEST = 'com.audioscribe.glass.TRANSCRIBE_LATEST';
 
 // Tipi MIME audio accettati da Gemini.
 const GEMINI_MIME_TYPES = [
@@ -206,6 +205,10 @@ const AppInner = () => {
   const [llamaModel, setLlamaModel] = useState(DEFAULT_LLAMA_MODEL);
   const [geminiKey, setGeminiKey] = useState('');
   const [geminiModel, setGeminiModel] = useState(DEFAULT_GEMINI_MODEL);
+  // Opzioni di trascrizione Gemini (le stesse di AI Studio)
+  const [geminiSmart, setGeminiSmart] = useState(true);
+  const [geminiLang, setGeminiLang] = useState('auto'); // 'auto' | codice BCP-47
+  const [geminiVocab, setGeminiVocab] = useState('');
 
   // Evita di sovrascrivere lo storage prima del caricamento iniziale
   const historyLoaded = useRef(false);
@@ -233,6 +236,28 @@ const AppInner = () => {
     AsyncStorage.setItem('@history', JSON.stringify(history)).catch(() => {});
   }, [history]);
 
+  // --- SCORCIATOIA "TRASCRIVI ULTIMO VOCALE" ---
+  // L'app puo essere aperta dalla scorciatoia sulla home: in quel caso parte
+  // subito la trascrizione. Controlliamo anche al ritorno in primo piano,
+  // perche con launchMode=singleTask l'app potrebbe essere gia aperta.
+  useEffect(() => {
+    if (!Native) return;
+    const checkLaunchAction = async () => {
+      try {
+        const action = await Native.consumeLaunchAction();
+        if (action === ACTION_TRANSCRIBE_LATEST) transcribeLatest();
+      } catch (e) {
+        // nessuna azione da gestire
+      }
+    };
+    checkLaunchAction();
+    const sub = AppState.addEventListener('change', state => {
+      if (state === 'active') checkLaunchAction();
+    });
+    return () => sub.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const loadData = async () => {
     try {
       const jsonHistory = await AsyncStorage.getItem('@history');
@@ -249,6 +274,12 @@ const AppInner = () => {
       if (savedGeminiKey) setGeminiKey(savedGeminiKey);
       const savedGeminiModel = await AsyncStorage.getItem('@gemini_model');
       if (savedGeminiModel) setGeminiModel(savedGeminiModel);
+      const savedSmart = await AsyncStorage.getItem('@gemini_smart');
+      if (savedSmart != null) setGeminiSmart(savedSmart === '1');
+      const savedLang = await AsyncStorage.getItem('@gemini_lang');
+      if (savedLang) setGeminiLang(savedLang);
+      const savedVocab = await AsyncStorage.getItem('@gemini_vocab');
+      if (savedVocab) setGeminiVocab(savedVocab);
     } catch (e) {
       // ignora
     } finally {
@@ -263,9 +294,14 @@ const AppInner = () => {
     try {
       const savedProvider = await AsyncStorage.getItem('@provider');
       if ((savedProvider || provider) === 'gemini') {
-        const key = (await AsyncStorage.getItem('@gemini_key')) || geminiKey;
-        const model = (await AsyncStorage.getItem('@gemini_model')) || geminiModel;
-        processWithGemini(uri, key, model, sharedMime);
+        const savedSmart = await AsyncStorage.getItem('@gemini_smart');
+        processWithGemini(uri, sharedMime, {
+          key: (await AsyncStorage.getItem('@gemini_key')) || geminiKey,
+          model: (await AsyncStorage.getItem('@gemini_model')) || geminiModel,
+          smart: savedSmart != null ? savedSmart === '1' : geminiSmart,
+          lang: (await AsyncStorage.getItem('@gemini_lang')) || geminiLang,
+          vocab: (await AsyncStorage.getItem('@gemini_vocab')) ?? geminiVocab,
+        });
         return;
       }
       const savedKey = await AsyncStorage.getItem('@api_key');
@@ -284,6 +320,9 @@ const AppInner = () => {
     await AsyncStorage.setItem('@llama_model', llamaModel);
     await AsyncStorage.setItem('@gemini_key', geminiKey);
     await AsyncStorage.setItem('@gemini_model', geminiModel);
+    await AsyncStorage.setItem('@gemini_smart', geminiSmart ? '1' : '0');
+    await AsyncStorage.setItem('@gemini_lang', geminiLang);
+    await AsyncStorage.setItem('@gemini_vocab', geminiVocab);
     setViewMode('history');
     Alert.alert('Salvataggio', 'Impostazioni aggiornate.');
   };
@@ -310,30 +349,46 @@ const AppInner = () => {
   };
 
   // --- MOTORE GEMINI: una sola chiamata, trascrive e formatta insieme ---
-  const processWithGemini = async (
-    uri: string, keyToUse: string, modelToUse: string, sharedMime?: string,
-  ) => {
+  type GeminiOpts = {
+    key: string; model: string; smart: boolean; lang: string; vocab: string;
+  };
+
+  const processWithGemini = async (uri: string, sharedMime: string | undefined, opts: GeminiOpts) => {
     setLoading(true);
     setTranscription('Lettura audio...');
     try {
-      if (!keyToUse) {
+      if (!opts.key) {
         setTranscription('Errore: manca la API key di Gemini. Aprila in Impostazioni.');
         return;
       }
       const cleanUri = normalizeUri(uri);
-      const base64 = await NativeModules.AudioBase64.readAsBase64(cleanUri);
+      const base64 = await Native.readAsBase64(cleanUri);
 
-      setTranscription(`Trascrizione con ${modelToUse}...`);
+      // Stesse opzioni di AI Studio. "smart" applica pulizia delle esitazioni,
+      // correzione grammaticale e formattazione; non e combinabile con
+      // timestamp o diarizzazione, che qui non servono.
+      const transcriptionConfig: any = {
+        language_codes: opts.lang === 'auto' ? [] : [opts.lang],
+        mode: opts.smart ? 'smart' : { type: 'verbatim' },
+      };
+      const vocabList = opts.vocab
+        .split(/[,\n]/)
+        .map(s => s.trim())
+        .filter(Boolean)
+        .slice(0, 1000);
+      if (vocabList.length) transcriptionConfig.custom_vocabulary = vocabList;
+
+      setTranscription(`Trascrizione con ${opts.model}...`);
       const res = await axios.post(
         GEMINI_ENDPOINT,
         {
-          model: modelToUse,
+          model: opts.model,
           input: [
-            { type: 'text', text: GEMINI_PROMPT },
             { type: 'audio', data: base64, mime_type: toGeminiMime(sharedMime, cleanUri) },
           ],
+          generation_config: { transcription_config: transcriptionConfig },
         },
-        { headers: { 'x-goog-api-key': keyToUse, 'Content-Type': 'application/json' } },
+        { headers: { 'x-goog-api-key': opts.key, 'Content-Type': 'application/json' } },
       );
 
       const text = extractGeminiText(res.data);
@@ -418,11 +473,41 @@ const AppInner = () => {
     ]);
   };
 
-  const newTranscriptionHint = () => {
-    Alert.alert(
-      'Nuova trascrizione',
-      'Condividi un messaggio vocale verso AudioScribe dal menu di condivisione di WhatsApp. Puoi farne quante vuoi di seguito: si aggiungeranno qui sotto.',
-    );
+  // --- ULTIMO VOCALE: trascrive senza passare dalla condivisione ---
+  const transcribeLatest = async () => {
+    if (!Native) return;
+    try {
+      const allowed = await Native.hasAllFilesAccess();
+      if (!allowed) {
+        Alert.alert(
+          'Permesso necessario',
+          'Per trovare da solo l\'ultimo vocale serve l\'accesso ai file: la cartella di WhatsApp non e visibile alle app senza di esso.\n\n' +
+          'Nella schermata che si apre attiva "Consenti accesso per gestire tutti i file", poi torna qui.',
+          [
+            { text: 'Annulla', style: 'cancel' },
+            {
+              text: 'Apri impostazioni',
+              onPress: () => { Native.requestAllFilesAccess().catch(() => {}); },
+            },
+          ],
+        );
+        return;
+      }
+
+      const latest = await Native.findLatestVoiceNote();
+      if (!latest || !latest.uri) {
+        Alert.alert(
+          'Nessun vocale trovato',
+          'Non ho trovato vocali WhatsApp sul dispositivo. Puoi sempre usare Condividi da WhatsApp.',
+        );
+        return;
+      }
+
+      setViewMode('overlay');
+      loadSettingsAndProcess(latest.uri, latest.mimeType);
+    } catch (e: any) {
+      Alert.alert('Errore', e?.message || 'Impossibile cercare l\'ultimo vocale.');
+    }
   };
 
   // ===================================================================
@@ -472,8 +557,8 @@ const AppInner = () => {
             </View>
             <Text style={[styles.hint, { color: palette.subText }]}>
               {provider === 'groq'
-                ? 'Whisper trascrive, poi un LLM formatta. Due chiamate, piano gratuito.'
-                : 'Gemini 3.5 Transcribe trascrive e formatta in una sola chiamata. Richiede fatturazione attiva su Google AI Studio (~$0,005/min).'}
+                ? 'Whisper trascrive, poi un LLM formatta. Due chiamate.'
+                : 'Gemini 3.5 Transcribe trascrive e formatta in una sola chiamata.'}
             </Text>
 
             {provider === 'groq' ? (
@@ -514,6 +599,66 @@ const AppInner = () => {
                   value={geminiModel} onChangeText={setGeminiModel}
                   placeholderTextColor={palette.subText} autoCapitalize="none"
                 />
+
+                <View style={[styles.rowBetween, { marginTop: 18 }]}>
+                  <View style={{ flex: 1, paddingRight: 12 }}>
+                    <Text style={[styles.label, { color: palette.subText, marginTop: 0 }]}>
+                      Trascrizione smart
+                    </Text>
+                    <Text style={[styles.hint, { color: palette.subText, marginTop: 0 }]}>
+                      Rimuove esitazioni, corregge la grammatica e applica le
+                      autocorrezioni di chi parla.
+                    </Text>
+                  </View>
+                  <Switch
+                    value={geminiSmart}
+                    onValueChange={setGeminiSmart}
+                    trackColor={{ true: palette.accentSolid, false: palette.glassBorder }}
+                  />
+                </View>
+
+                <Text style={[styles.label, { color: palette.subText }]}>Lingua</Text>
+                <View style={[styles.segment, { borderColor: palette.glassBorder }]}>
+                  {([
+                    { id: 'auto', label: 'Rileva' },
+                    { id: 'it-IT', label: 'Italiano' },
+                  ]).map(opt => {
+                    const active = geminiLang === opt.id;
+                    return (
+                      <TouchableOpacity
+                        key={opt.id}
+                        onPress={() => setGeminiLang(opt.id)}
+                        activeOpacity={0.8}
+                        style={[styles.segmentItem, active && { backgroundColor: palette.accentSolid }]}
+                      >
+                        <Text style={{
+                          color: active ? '#fff' : palette.subText,
+                          fontWeight: '700',
+                          fontSize: 13,
+                        }}>
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                <Text style={[styles.label, { color: palette.subText }]}>Vocabolario personalizzato</Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    styles.inputMultiline,
+                    { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder },
+                  ]}
+                  value={geminiVocab} onChangeText={setGeminiVocab}
+                  placeholder="Nomi, termini tecnici... separati da virgola"
+                  placeholderTextColor={palette.subText}
+                  autoCapitalize="none" multiline
+                />
+                <Text style={[styles.hint, { color: palette.subText }]}>
+                  Nomi propri e termini che il modello sbaglia spesso. Fino a
+                  1000, ma si rende al meglio con un centinaio.
+                </Text>
               </>
             )}
 
@@ -621,7 +766,8 @@ const AppInner = () => {
                 <Text style={styles.emptyEmoji}>🎙️</Text>
                 <Text style={[styles.emptyTitle, { color: palette.text }]}>Nessuna trascrizione</Text>
                 <Text style={[styles.emptyText, { color: palette.subText }]}>
-                  Condividi un messaggio vocale da WhatsApp verso AudioScribe per iniziare.
+                  Tocca "Ultimo vocale" qui sotto, oppure condividi un messaggio
+                  vocale da WhatsApp verso AudioScribe.
                 </Text>
               </View>
             </GlassSurface>
@@ -654,12 +800,12 @@ const AppInner = () => {
       {/* FAB informativo per la prossima trascrizione */}
       <TouchableOpacity
         activeOpacity={0.85}
-        onPress={newTranscriptionHint}
+        onPress={transcribeLatest}
         style={[styles.fab, { bottom: insets.bottom + 24 }]}
       >
         <GlassSurface palette={palette} strong radius={30} style={styles.fabGlass}>
           <View style={styles.fabInner}>
-            <Text style={[styles.fabText, { color: palette.text }]}>＋  Nuova</Text>
+            <Text style={[styles.fabText, { color: palette.text }]}>🎙️  Ultimo vocale</Text>
           </View>
         </GlassSurface>
       </TouchableOpacity>
@@ -734,6 +880,7 @@ const styles = StyleSheet.create({
   settingsInner: { padding: 24 },
   label: { fontSize: 12, fontWeight: '700', marginTop: 12, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
   input: { padding: 13, borderRadius: 12, fontSize: 16, borderWidth: 1 },
+  inputMultiline: { minHeight: 76, textAlignVertical: 'top' },
   hint: { fontSize: 12, lineHeight: 17, marginTop: 8 },
   segment: { flexDirection: 'row', borderRadius: 12, borderWidth: 1, overflow: 'hidden' },
   segmentItem: { flex: 1, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },

@@ -7,22 +7,21 @@ import com.facebook.react.module.model.ReactModuleInfo
 import com.facebook.react.module.model.ReactModuleInfoProvider
 
 /**
- * Registra AudioBase64Module. Usa BaseReactPackage (API non deprecata,
- * compatibile con la new architecture / bridgeless) invece del vecchio
- * ReactPackage.createNativeModules.
+ * Registra AudioScribeModule. Usa BaseReactPackage (API non deprecata,
+ * compatibile con la new architecture / bridgeless).
  */
-class AudioBase64Package : BaseReactPackage() {
+class AudioScribePackage : BaseReactPackage() {
 
   override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? =
-    if (name == AudioBase64Module.NAME) AudioBase64Module(reactContext) else null
+    if (name == AudioScribeModule.NAME) AudioScribeModule(reactContext) else null
 
   override fun getReactModuleInfoProvider(): ReactModuleInfoProvider =
     ReactModuleInfoProvider {
       mapOf(
-        AudioBase64Module.NAME to
+        AudioScribeModule.NAME to
           ReactModuleInfo(
-            AudioBase64Module.NAME,
-            AudioBase64Module::class.java.name,
+            AudioScribeModule.NAME,
+            AudioScribeModule::class.java.name,
             false, // canOverrideExistingModule
             false, // needsEagerInit
             false, // isCxxModule

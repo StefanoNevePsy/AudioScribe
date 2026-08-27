@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">AudioScribe Glass</string>
+    <string name="shortcut_latest_short">Ultimo vocale</string>
+    <string name="shortcut_latest_long">Trascrivi ultimo vocale</string>
+    <string name="shortcut_share_short">Trascrivi</string>
+    <string name="shortcut_share_long">Trascrivi con AudioScribe</string>
 </resources>

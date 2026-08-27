@@ -1,6 +1,17 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Serve per trovare l'ultimo vocale WhatsApp: la sua cartella contiene
+         .nomedia, quindi non e indicizzata da MediaStore e va letta dal
+         filesystem. L'app e distribuita via sideload, non sul Play Store. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
       android:name=".MainApplication"
@@ -9,6 +20,7 @@
       android:roundIcon="@mipmap/ic_launcher_round"
       android:allowBackup="false"
       android:theme="@style/AppTheme"
+      android:requestLegacyExternalStorage="true"
       android:supportsRtl="true">
       <activity
         android:name=".MainActivity"
@@ -22,6 +34,10 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
+        <!-- Direct Share + scorciatoia "Trascrivi ultimo vocale" -->
+        <meta-data
+            android:name="android.app.shortcuts"
+            android:resource="@xml/shortcuts" />
         <!-- Ricezione di audio/file condivisi (react-native-share-menu).
              WhatsApp puo condividere i vocali con tipi MIME diversi
              (audio/ogg, application/octet-stream, ecc.), quindi accettiamo

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Direct Share: fa comparire l'app nella riga di suggerimenti in cima
+         al menu di condivisione, insieme allo shortcut dinamico pubblicato
+         da MainApplication. -->
+    <share-target android:targetClass="com.audioscribe.glass.MainActivity">
+        <data android:mimeType="audio/*" />
+        <data android:mimeType="*/*" />
+        <category android:name="com.audioscribe.glass.category.AUDIO_SHARE_TARGET" />
+    </share-target>
+
+    <!-- Scorciatoia statica: compare tenendo premuta l'icona dell'app e puo
+         essere trascinata sulla home come icona a se stante. -->
+    <shortcut
+        android:shortcutId="transcribe_latest"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_latest_short"
+        android:shortcutLongLabel="@string/shortcut_latest_long">
+        <intent
+            android:action="com.audioscribe.glass.TRANSCRIBE_LATEST"
+            android:targetPackage="com.audioscribe.glass"
+            android:targetClass="com.audioscribe.glass.MainActivity" />
+    </shortcut>
+
+</shortcuts>
