@@ -1,214 +1,60 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, TextInput,
-  ActivityIndicator, ScrollView, FlatList, Alert, useColorScheme,
-  StatusBar, Animated, Easing, NativeModules, AppState, Switch,
+  View, Text, StyleSheet, TouchableOpacity, ScrollView, SectionList, Alert,
+  useColorScheme, StatusBar, AppState, Switch, Share,
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import ShareMenu from 'react-native-share-menu';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import axios from 'axios';
 import Clipboard from '@react-native-clipboard/clipboard';
-import { BlurView } from '@react-native-community/blur';
 
-// --- CONFIGURAZIONE ---
-const DEFAULT_WHISPER_MODEL = 'whisper-large-v3';
-// llama-3.3-70b-versatile viene dismesso da Groq il 16/08/2026.
-// Sostituito con il modello consigliato openai/gpt-oss-120b.
-const DEFAULT_LLAMA_MODEL = 'openai/gpt-oss-120b';
-const DEFAULT_API_KEY = 'INSERISCI_QUI_LA_TUA_CHIAVE_GROQ';
+import { getTheme, font, dayLabel, timeLabel, todayEyebrow, formatBytes } from './src/theme';
+import {
+  Engine, ENGINE_LABELS, DEFAULTS, Native, LocalAsr, localAsrEvents, errorMessage,
+  transcribeWithGroq, transcribeWithGemini, transcribeLocally,
+} from './src/engines';
+import {
+  Waveform, AnimatedWaveform, SlidersIcon, BackIcon, RoundButton, Button,
+  Segmented, SectionTitle, Field, ProgressBar,
+} from './src/ui';
 
-// Gemini 3.5 Transcribe: trascrive E formatta in una sola chiamata.
-const DEFAULT_GEMINI_MODEL = 'gemini-3.5-transcribe';
-const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
-
-// Modulo nativo locale (lettura base64, ultimo vocale, azione di avvio).
-const Native = NativeModules.AudioScribeNative;
 const ACTION_TRANSCRIBE_LATEST = 'com.audioscribe.glass.TRANSCRIBE_LATEST';
 
-// Tipi MIME audio accettati da Gemini.
-const GEMINI_MIME_TYPES = [
-  'audio/wav', 'audio/mp3', 'audio/aiff', 'audio/aac', 'audio/ogg', 'audio/flac',
-];
+type Item = { id: string; text: string; ts: number; engine?: Engine; date?: string };
+type View_ = 'history' | 'reader' | 'settings';
+type LocalStatus = { installed: boolean; downloadedBytes: number; totalBytes: number };
 
-// WhatsApp puo dichiarare tipi non standard (audio/opus, octet-stream...):
-// li normalizziamo su un tipo che Gemini accetta.
-const toGeminiMime = (declared?: string, uri?: string) => {
-  const raw = (declared || '').split(';')[0].trim().toLowerCase();
-  if (GEMINI_MIME_TYPES.includes(raw)) return raw;
-  const aliases: Record<string, string> = {
-    'audio/mpeg': 'audio/mp3',
-    'audio/opus': 'audio/ogg',
-    'audio/vorbis': 'audio/ogg',
-    'audio/x-wav': 'audio/wav',
-    'audio/wave': 'audio/wav',
-    'audio/mp4': 'audio/aac',
-    'audio/m4a': 'audio/aac',
-    'audio/x-m4a': 'audio/aac',
-  };
-  if (aliases[raw]) return aliases[raw];
+// Le voci salvate dalle versioni precedenti non hanno `ts`: l'id e un Date.now().
+const itemTs = (item: Item) => item.ts || Number(item.id) || 0;
 
-  const ext = (uri || '').split('?')[0].split('.').pop()?.toLowerCase() || '';
-  const byExt: Record<string, string> = {
-    ogg: 'audio/ogg', opus: 'audio/ogg', mp3: 'audio/mp3', wav: 'audio/wav',
-    flac: 'audio/flac', aac: 'audio/aac', m4a: 'audio/aac', aiff: 'audio/aiff',
-  };
-  // I vocali WhatsApp sono ogg/opus: default sensato.
-  return byExt[ext] || 'audio/ogg';
-};
-
-// La risposta di /v1beta/interactions espone il testo in steps[].content[].
-// Restiamo tolleranti su piu forme per non rompere se l'API evolve.
-const extractGeminiText = (data: any): string => {
-  if (!data) return '';
-  if (typeof data.output_text === 'string' && data.output_text.trim()) {
-    return data.output_text.trim();
-  }
-  const fromSteps = (data.steps || [])
-    .flatMap((s: any) => s?.content || [])
-    .map((c: any) => (typeof c?.text === 'string' ? c.text : ''))
-    .filter(Boolean)
-    .join('\n')
-    .trim();
-  if (fromSteps) return fromSteps;
-
-  return (data.candidates || [])
-    .flatMap((c: any) => c?.content?.parts || [])
-    .map((p: any) => (typeof p?.text === 'string' ? p.text : ''))
-    .filter(Boolean)
-    .join('\n')
-    .trim();
-};
-
-// =====================================================================
-//  PALETTE LIQUID GLASS
-// =====================================================================
-const getPalette = (isDark: boolean) => isDark ? {
-  base: '#070711',
-  blobs: ['#7C3AED', '#2563EB', '#DB2777', '#06B6D4'],
-  glassTint: 'rgba(28, 28, 44, 0.55)',
-  glassTintStrong: 'rgba(20, 20, 34, 0.72)',
-  glassBorder: 'rgba(255, 255, 255, 0.16)',
-  glassHighlight: 'rgba(255, 255, 255, 0.10)',
-  blurType: 'dark' as const,
-  fallback: '#15151F',
-  text: '#F6F6FB',
-  subText: 'rgba(246, 246, 251, 0.58)',
-  inputBg: 'rgba(255, 255, 255, 0.06)',
-  accent: '#A78BFA',
-  accentSolid: '#7C3AED',
-  success: '#34D399',
-  danger: '#FB7185',
-} : {
-  base: '#EAEDFB',
-  blobs: ['#A78BFA', '#60A5FA', '#F0ABFC', '#67E8F9'],
-  glassTint: 'rgba(255, 255, 255, 0.45)',
-  glassTintStrong: 'rgba(255, 255, 255, 0.62)',
-  glassBorder: 'rgba(255, 255, 255, 0.70)',
-  glassHighlight: 'rgba(255, 255, 255, 0.55)',
-  blurType: 'light' as const,
-  fallback: '#F2F4FE',
-  text: '#181826',
-  subText: 'rgba(24, 24, 38, 0.55)',
-  inputBg: 'rgba(255, 255, 255, 0.55)',
-  accent: '#7C3AED',
-  accentSolid: '#7C3AED',
-  success: '#16A34A',
-  danger: '#E11D48',
-};
-
-type Palette = ReturnType<typeof getPalette>;
-
-// =====================================================================
-//  SFONDO "AURORA" ANIMATO (blobs morbidi che danno l'effetto liquido)
-// =====================================================================
-const AuroraBackground = ({ palette }: { palette: Palette }) => {
-  const drift = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(drift, {
-          toValue: 1, duration: 9000, easing: Easing.inOut(Easing.ease), useNativeDriver: true,
-        }),
-        Animated.timing(drift, {
-          toValue: 0, duration: 9000, easing: Easing.inOut(Easing.ease), useNativeDriver: true,
-        }),
-      ]),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [drift]);
-
-  const up = drift.interpolate({ inputRange: [0, 1], outputRange: [0, -40] });
-  const down = drift.interpolate({ inputRange: [0, 1], outputRange: [0, 50] });
-  const side = drift.interpolate({ inputRange: [0, 1], outputRange: [0, 35] });
-
-  return (
-    <View style={[StyleSheet.absoluteFill, { backgroundColor: palette.base }]} pointerEvents="none">
-      <Animated.View style={[styles.blob, { backgroundColor: palette.blobs[0], top: -80, left: -60, transform: [{ translateY: up }, { translateX: side }] }]} />
-      <Animated.View style={[styles.blob, { backgroundColor: palette.blobs[1], top: 120, right: -90, transform: [{ translateY: down }] }]} />
-      <Animated.View style={[styles.blob, { backgroundColor: palette.blobs[2], bottom: 40, left: -70, transform: [{ translateY: up }] }]} />
-      <Animated.View style={[styles.blobSmall, { backgroundColor: palette.blobs[3], bottom: 180, right: -30, transform: [{ translateX: side }] }]} />
-    </View>
-  );
-};
-
-// =====================================================================
-//  SUPERFICIE IN VETRO (definita a livello di modulo -> niente remount,
-//  i TextInput non perdono il focus)
-// =====================================================================
-type GlassProps = {
-  palette: Palette;
-  style?: any;
-  radius?: number;
-  strong?: boolean;
-  children: React.ReactNode;
-};
-
-const GlassSurface = ({ palette, style, radius = 24, strong = false, children }: GlassProps) => (
-  <View style={[{ borderRadius: radius, overflow: 'hidden', borderWidth: 1, borderColor: palette.glassBorder }, style]}>
-    {/* Layer di blur reale: sfondo assoluto, NON avvolge il contenuto */}
-    <BlurView
-      style={StyleSheet.absoluteFill}
-      blurType={palette.blurType}
-      blurAmount={strong ? 28 : 18}
-      reducedTransparencyFallbackColor={palette.fallback}
-    />
-    {/* Tinta semitrasparente: garantisce l'aspetto vetro anche se il blur non rende */}
-    <View style={[StyleSheet.absoluteFill, { backgroundColor: strong ? palette.glassTintStrong : palette.glassTint }]} />
-    {/* Riflesso superiore */}
-    <View style={[styles.topHighlight, { backgroundColor: palette.glassHighlight }]} />
-    {children}
-  </View>
-);
-
-// =====================================================================
-//  APP
-// =====================================================================
 const AppInner = () => {
-  const systemScheme = useColorScheme();
-  const isDarkMode = systemScheme === 'dark';
-  const palette = getPalette(isDarkMode);
+  const dark = useColorScheme() === 'dark';
+  const theme = useMemo(() => getTheme(dark), [dark]);
   const insets = useSafeAreaInsets();
 
   // --- STATI APP ---
-  const [transcription, setTranscription] = useState('');
+  const [history, setHistory] = useState<Item[]>([]);
+  const [viewMode, setViewMode] = useState<View_>('history');
+  const [current, setCurrent] = useState<Item | null>(null);
   const [loading, setLoading] = useState(false);
-  const [history, setHistory] = useState<any[]>([]);
-  const [viewMode, setViewMode] = useState<'history' | 'reader' | 'overlay' | 'settings'>('history');
+  const [status, setStatus] = useState('');
+  const [error, setError] = useState('');
 
   // --- STATI IMPOSTAZIONI ---
-  const [provider, setProvider] = useState<'groq' | 'gemini'>('groq');
-  const [apiKey, setApiKey] = useState(DEFAULT_API_KEY);
-  const [whisperModel, setWhisperModel] = useState(DEFAULT_WHISPER_MODEL);
-  const [llamaModel, setLlamaModel] = useState(DEFAULT_LLAMA_MODEL);
+  const [provider, setProvider] = useState<Engine>('groq');
+  const [apiKey, setApiKey] = useState(DEFAULTS.apiKey);
+  const [whisperModel, setWhisperModel] = useState(DEFAULTS.whisperModel);
+  const [llamaModel, setLlamaModel] = useState(DEFAULTS.llamaModel);
   const [geminiKey, setGeminiKey] = useState('');
-  const [geminiModel, setGeminiModel] = useState(DEFAULT_GEMINI_MODEL);
-  // Opzioni di trascrizione Gemini (le stesse di AI Studio)
+  const [geminiModel, setGeminiModel] = useState(DEFAULTS.geminiModel);
   const [geminiSmart, setGeminiSmart] = useState(true);
   const [geminiLang, setGeminiLang] = useState('auto'); // 'auto' | codice BCP-47
   const [geminiVocab, setGeminiVocab] = useState('');
+
+  // --- MODELLO LOCALE ---
+  const [localStatus, setLocalStatus] = useState<LocalStatus | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [download, setDownload] = useState({ received: 0, total: 1, label: '' });
 
   // Evita di sovrascrivere lo storage prima del caricamento iniziale
   const historyLoaded = useRef(false);
@@ -216,15 +62,14 @@ const AppInner = () => {
   // --- CARICAMENTO INIZIALE + LISTENER CONDIVISIONE ---
   useEffect(() => {
     loadData();
+    refreshLocalStatus();
     const handleShare = (item: any) => {
-      if (item && item.data) {
-        setViewMode('overlay');
-        loadSettingsAndProcess(item.data, item.mimeType);
-      }
+      if (item && item.data) runTranscription(item.data, item.mimeType);
     };
     ShareMenu.getInitialShare(handleShare);
     const listener = ShareMenu.addNewShareListener(handleShare);
-    return () => listener.remove();
+    const dl = localAsrEvents?.addListener('LocalAsrDownload', e => setDownload(e));
+    return () => { listener.remove(); dl?.remove(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -260,26 +105,20 @@ const AppInner = () => {
 
   const loadData = async () => {
     try {
-      const jsonHistory = await AsyncStorage.getItem('@history');
+      const get = (k: string) => AsyncStorage.getItem(k);
+      const jsonHistory = await get('@history');
       if (jsonHistory != null) setHistory(JSON.parse(jsonHistory));
-      const savedKey = await AsyncStorage.getItem('@api_key');
-      if (savedKey) setApiKey(savedKey);
-      const savedWhisper = await AsyncStorage.getItem('@whisper_model');
-      if (savedWhisper) setWhisperModel(savedWhisper);
-      const savedLlama = await AsyncStorage.getItem('@llama_model');
-      if (savedLlama) setLlamaModel(savedLlama);
-      const savedProvider = await AsyncStorage.getItem('@provider');
-      if (savedProvider === 'gemini' || savedProvider === 'groq') setProvider(savedProvider);
-      const savedGeminiKey = await AsyncStorage.getItem('@gemini_key');
-      if (savedGeminiKey) setGeminiKey(savedGeminiKey);
-      const savedGeminiModel = await AsyncStorage.getItem('@gemini_model');
-      if (savedGeminiModel) setGeminiModel(savedGeminiModel);
-      const savedSmart = await AsyncStorage.getItem('@gemini_smart');
+      const savedProvider = await get('@provider');
+      if (savedProvider === 'gemini' || savedProvider === 'groq' || savedProvider === 'local') setProvider(savedProvider);
+      setApiKey((await get('@api_key')) || DEFAULTS.apiKey);
+      setWhisperModel((await get('@whisper_model')) || DEFAULTS.whisperModel);
+      setLlamaModel((await get('@llama_model')) || DEFAULTS.llamaModel);
+      setGeminiKey((await get('@gemini_key')) || '');
+      setGeminiModel((await get('@gemini_model')) || DEFAULTS.geminiModel);
+      const savedSmart = await get('@gemini_smart');
       if (savedSmart != null) setGeminiSmart(savedSmart === '1');
-      const savedLang = await AsyncStorage.getItem('@gemini_lang');
-      if (savedLang) setGeminiLang(savedLang);
-      const savedVocab = await AsyncStorage.getItem('@gemini_vocab');
-      if (savedVocab) setGeminiVocab(savedVocab);
+      setGeminiLang((await get('@gemini_lang')) || 'auto');
+      setGeminiVocab((await get('@gemini_vocab')) || '');
     } catch (e) {
       // ignora
     } finally {
@@ -287,155 +126,47 @@ const AppInner = () => {
     }
   };
 
+  const refreshLocalStatus = async () => {
+    if (!LocalAsr) return;
+    try { setLocalStatus(await LocalAsr.getModelStatus()); } catch (e) { /* ignora */ }
+  };
+
   // Legge le impostazioni salvate (non lo stato, che potrebbe non essere
   // ancora popolato quando l'app viene aperta dalla condivisione) e instrada
   // verso il motore scelto.
-  const loadSettingsAndProcess = async (uri: string, sharedMime?: string) => {
+  const runTranscription = async (uri: string, sharedMime?: string) => {
+    setCurrent(null);
+    setError('');
+    setStatus('Preparazione…');
+    setLoading(true);
+    setViewMode('reader');
+
+    const get = (k: string) => AsyncStorage.getItem(k);
+    let engine: Engine = 'groq';
     try {
-      const savedProvider = await AsyncStorage.getItem('@provider');
-      if ((savedProvider || provider) === 'gemini') {
-        const savedSmart = await AsyncStorage.getItem('@gemini_smart');
-        processWithGemini(uri, sharedMime, {
-          key: (await AsyncStorage.getItem('@gemini_key')) || geminiKey,
-          model: (await AsyncStorage.getItem('@gemini_model')) || geminiModel,
+      engine = ((await get('@provider')) as Engine) || provider;
+      let text: string;
+      if (engine === 'local') {
+        text = await transcribeLocally(uri, setStatus);
+      } else if (engine === 'gemini') {
+        const savedSmart = await get('@gemini_smart');
+        text = await transcribeWithGemini(uri, sharedMime, {
+          key: (await get('@gemini_key')) || geminiKey,
+          model: (await get('@gemini_model')) || geminiModel,
           smart: savedSmart != null ? savedSmart === '1' : geminiSmart,
-          lang: (await AsyncStorage.getItem('@gemini_lang')) || geminiLang,
-          vocab: (await AsyncStorage.getItem('@gemini_vocab')) ?? geminiVocab,
-        });
-        return;
+          lang: (await get('@gemini_lang')) || geminiLang,
+          vocab: (await get('@gemini_vocab')) ?? geminiVocab,
+        }, setStatus);
+      } else {
+        text = await transcribeWithGroq(uri, {
+          key: (await get('@api_key')) || apiKey,
+          whisperModel: (await get('@whisper_model')) || whisperModel,
+          llamaModel: (await get('@llama_model')) || llamaModel,
+        }, setStatus);
       }
-      const savedKey = await AsyncStorage.getItem('@api_key');
-      const savedWhisper = await AsyncStorage.getItem('@whisper_model');
-      const savedLlama = await AsyncStorage.getItem('@llama_model');
-      processAudio(uri, savedKey || apiKey, savedWhisper || whisperModel, savedLlama || llamaModel);
-    } catch (e) {
-      processAudio(uri, apiKey, whisperModel, llamaModel);
-    }
-  };
-
-  const saveSettings = async () => {
-    await AsyncStorage.setItem('@provider', provider);
-    await AsyncStorage.setItem('@api_key', apiKey);
-    await AsyncStorage.setItem('@whisper_model', whisperModel);
-    await AsyncStorage.setItem('@llama_model', llamaModel);
-    await AsyncStorage.setItem('@gemini_key', geminiKey);
-    await AsyncStorage.setItem('@gemini_model', geminiModel);
-    await AsyncStorage.setItem('@gemini_smart', geminiSmart ? '1' : '0');
-    await AsyncStorage.setItem('@gemini_lang', geminiLang);
-    await AsyncStorage.setItem('@gemini_vocab', geminiVocab);
-    setViewMode('history');
-    Alert.alert('Salvataggio', 'Impostazioni aggiornate.');
-  };
-
-  const resetSettings = () => {
-    setWhisperModel(DEFAULT_WHISPER_MODEL);
-    setLlamaModel(DEFAULT_LLAMA_MODEL);
-    setGeminiModel(DEFAULT_GEMINI_MODEL);
-    Alert.alert('Ripristinato', 'Modelli ripristinati.');
-  };
-
-  const normalizeUri = (uri: string) => {
-    if (!uri.startsWith('file://') && !uri.startsWith('content://')) {
-      return 'file://' + uri;
-    }
-    return uri;
-  };
-
-  const showError = (error: any) => {
-    let errorMsg = error?.message || 'Errore sconosciuto';
-    const apiError = error?.response?.data?.error;
-    if (apiError) errorMsg = typeof apiError === 'string' ? apiError : JSON.stringify(apiError);
-    setTranscription('Errore: ' + errorMsg);
-  };
-
-  // --- MOTORE GEMINI: una sola chiamata, trascrive e formatta insieme ---
-  type GeminiOpts = {
-    key: string; model: string; smart: boolean; lang: string; vocab: string;
-  };
-
-  const processWithGemini = async (uri: string, sharedMime: string | undefined, opts: GeminiOpts) => {
-    setLoading(true);
-    setTranscription('Lettura audio...');
-    try {
-      if (!opts.key) {
-        setTranscription('Errore: manca la API key di Gemini. Aprila in Impostazioni.');
-        return;
-      }
-      const cleanUri = normalizeUri(uri);
-      const base64 = await Native.readAsBase64(cleanUri);
-
-      // Stesse opzioni di AI Studio. "smart" applica pulizia delle esitazioni,
-      // correzione grammaticale e formattazione; non e combinabile con
-      // timestamp o diarizzazione, che qui non servono.
-      const transcriptionConfig: any = {
-        language_codes: opts.lang === 'auto' ? [] : [opts.lang],
-        mode: opts.smart ? 'smart' : { type: 'verbatim' },
-      };
-      const vocabList = opts.vocab
-        .split(/[,\n]/)
-        .map(s => s.trim())
-        .filter(Boolean)
-        .slice(0, 1000);
-      if (vocabList.length) transcriptionConfig.custom_vocabulary = vocabList;
-
-      setTranscription(`Trascrizione con ${opts.model}...`);
-      const res = await axios.post(
-        GEMINI_ENDPOINT,
-        {
-          model: opts.model,
-          input: [
-            { type: 'audio', data: base64, mime_type: toGeminiMime(sharedMime, cleanUri) },
-          ],
-          generation_config: { transcription_config: transcriptionConfig },
-        },
-        { headers: { 'x-goog-api-key': opts.key, 'Content-Type': 'application/json' } },
-      );
-
-      const text = extractGeminiText(res.data);
-      if (!text) {
-        setTranscription('Errore: Gemini non ha restituito testo.');
-        return;
-      }
-      finishProcess(text);
-    } catch (error: any) {
-      showError(error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const processAudio = async (uri: string, keyToUse: string, whisperToUse: string, llamaToUse: string) => {
-    setLoading(true);
-    setTranscription('Trascrizione in corso...');
-    try {
-      const cleanUri = normalizeUri(uri);
-      const fileData: any = { uri: cleanUri, type: 'audio/ogg', name: 'audio.ogg' };
-
-      const formData = new FormData();
-      formData.append('file', fileData);
-      formData.append('model', whisperToUse);
-      formData.append('prompt', 'Testo in italiano.');
-
-      const transRes = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', formData, {
-        headers: { Authorization: `Bearer ${keyToUse}`, 'Content-Type': 'multipart/form-data' },
-      });
-
-      const rawText = transRes.data.text;
-      if (rawText.length < 10) { finishProcess(rawText); return; }
-
-      setTranscription(`Formattazione con ${llamaToUse}...`);
-      const chatRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-        model: llamaToUse,
-        messages: [
-          { role: 'system', content: 'Formatta il seguente testo parlato: aggiungi punteggiatura, maiuscole e dividi in paragrafi. Non cambiare le parole.' },
-          { role: 'user', content: rawText },
-        ],
-      }, {
-        headers: { Authorization: `Bearer ${keyToUse}`, 'Content-Type': 'application/json' },
-      });
-      finishProcess(chatRes.data.choices[0].message.content);
-    } catch (error: any) {
-      showError(error);
+      finishProcess(text, engine);
+    } catch (e: any) {
+      setError(errorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -444,17 +175,43 @@ const AppInner = () => {
   // Aggiunge in cronologia usando l'update funzionale: `prev` è sempre
   // l'ultimo valore, quindi le trascrizioni si accumulano correttamente
   // anche senza riavviare l'app.
-  const finishProcess = (text: string) => {
-    setTranscription(text);
-    setViewMode('reader');
-    const newItem = { id: Date.now().toString(), text, date: new Date().toLocaleString() };
-    setHistory(prev => [newItem, ...prev]);
+  const finishProcess = (text: string, engine: Engine) => {
+    const ts = Date.now();
+    const item: Item = { id: String(ts), text: text.trim(), ts, engine };
+    setCurrent(item);
+    setHistory(prev => [item, ...prev]);
+  };
+
+  const saveSettings = async () => {
+    await AsyncStorage.multiSet([
+      ['@provider', provider],
+      ['@api_key', apiKey],
+      ['@whisper_model', whisperModel],
+      ['@llama_model', llamaModel],
+      ['@gemini_key', geminiKey],
+      ['@gemini_model', geminiModel],
+      ['@gemini_smart', geminiSmart ? '1' : '0'],
+      ['@gemini_lang', geminiLang],
+      ['@gemini_vocab', geminiVocab],
+    ]);
+    setViewMode('history');
+    if (provider === 'local' && !localStatus?.installed) {
+      Alert.alert('Modello non ancora scaricato', 'Hai scelto la trascrizione locale: scarica il modello dalle Impostazioni prima di trascrivere.');
+    }
+  };
+
+  const resetSettings = () => {
+    setWhisperModel(DEFAULTS.whisperModel);
+    setLlamaModel(DEFAULTS.llamaModel);
+    setGeminiModel(DEFAULTS.geminiModel);
   };
 
   const copyText = (text: string) => {
     Clipboard.setString(text);
     Alert.alert('Copiato', 'Testo copiato negli appunti.');
   };
+
+  const shareText = (text: string) => { Share.share({ message: text }).catch(() => {}); };
 
   const deleteItem = (id: string) => {
     Alert.alert('Elimina', 'Vuoi cancellare questa trascrizione?', [
@@ -467,9 +224,9 @@ const AppInner = () => {
   };
 
   const clearAllHistory = () => {
-    Alert.alert('Attenzione', 'Eliminare TUTTO?', [
+    Alert.alert('Svuotare la cronologia?', 'Tutte le trascrizioni verranno eliminate.', [
       { text: 'Annulla', style: 'cancel' },
-      { text: 'ELIMINA', style: 'destructive', onPress: () => setHistory([]) },
+      { text: 'Elimina tutto', style: 'destructive', onPress: () => setHistory([]) },
     ]);
   };
 
@@ -485,337 +242,392 @@ const AppInner = () => {
           'Nella schermata che si apre attiva "Consenti accesso per gestire tutti i file", poi torna qui.',
           [
             { text: 'Annulla', style: 'cancel' },
-            {
-              text: 'Apri impostazioni',
-              onPress: () => { Native.requestAllFilesAccess().catch(() => {}); },
-            },
+            { text: 'Apri impostazioni', onPress: () => { Native.requestAllFilesAccess().catch(() => {}); } },
           ],
         );
         return;
       }
-
       const latest = await Native.findLatestVoiceNote();
       if (!latest || !latest.uri) {
-        Alert.alert(
-          'Nessun vocale trovato',
-          'Non ho trovato vocali WhatsApp sul dispositivo. Puoi sempre usare Condividi da WhatsApp.',
-        );
+        Alert.alert('Nessun vocale trovato', 'Non ho trovato vocali WhatsApp sul dispositivo. Puoi sempre usare Condividi da WhatsApp.');
         return;
       }
-
-      setViewMode('overlay');
-      loadSettingsAndProcess(latest.uri, latest.mimeType);
+      runTranscription(latest.uri, latest.mimeType);
     } catch (e: any) {
       Alert.alert('Errore', e?.message || 'Impossibile cercare l\'ultimo vocale.');
     }
   };
 
-  // ===================================================================
-  //  RENDER: IMPOSTAZIONI  (reso inline -> i TextInput tengono il focus)
-  // ===================================================================
-  const renderSettings = () => (
-    <View style={styles.fill}>
-      <AuroraBackground palette={palette} />
-      <View style={[styles.centeredOverlay, { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 20 }]}>
-        <GlassSurface palette={palette} strong style={styles.settingsCard}>
-          <ScrollView
-            style={styles.settingsScroll}
-            contentContainerStyle={styles.settingsInner}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-            <Text style={[styles.title, { color: palette.text, marginBottom: 20 }]}>Impostazioni</Text>
+  // --- GESTIONE MODELLO LOCALE ---
+  const startDownload = () => {
+    const doIt = async () => {
+      setDownloading(true);
+      try {
+        await LocalAsr.downloadModel();
+      } catch (e: any) {
+        if (e?.code !== 'E_CANCELLED') Alert.alert('Download non riuscito', errorMessage(e));
+      } finally {
+        setDownloading(false);
+        refreshLocalStatus();
+      }
+    };
+    const size = formatBytes(localStatus?.totalBytes || 0);
+    Alert.alert(
+      'Scaricare Parakeet Ultra?',
+      `Sono circa ${size}: meglio con il Wi-Fi. Se il download si interrompe, riprendera da dove si era fermato.`,
+      [{ text: 'Annulla', style: 'cancel' }, { text: 'Scarica', onPress: doIt }],
+    );
+  };
 
-            {/* Selettore del motore di trascrizione */}
-            <Text style={[styles.label, { color: palette.subText }]}>Motore</Text>
-            <View style={[styles.segment, { borderColor: palette.glassBorder }]}>
-              {([
-                { id: 'groq' as const, label: 'Groq' },
-                { id: 'gemini' as const, label: 'Gemini' },
-              ]).map(opt => {
-                const active = provider === opt.id;
-                return (
-                  <TouchableOpacity
-                    key={opt.id}
-                    onPress={() => setProvider(opt.id)}
-                    activeOpacity={0.8}
-                    style={[
-                      styles.segmentItem,
-                      active && { backgroundColor: palette.accentSolid },
-                    ]}
-                  >
-                    <Text style={{
-                      color: active ? '#fff' : palette.subText,
-                      fontWeight: '700',
-                      fontSize: 13,
-                    }}>
-                      {opt.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            <Text style={[styles.hint, { color: palette.subText }]}>
-              {provider === 'groq'
-                ? 'Whisper trascrive, poi un LLM formatta. Due chiamate.'
-                : 'Gemini 3.5 Transcribe trascrive e formatta in una sola chiamata.'}
-            </Text>
-
-            {provider === 'groq' ? (
-              <>
-                <Text style={[styles.label, { color: palette.subText }]}>API Key Groq</Text>
-                <TextInput
-                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
-                  value={apiKey} onChangeText={setApiKey} placeholder="gsk_..."
-                  placeholderTextColor={palette.subText} secureTextEntry
-                />
-
-                <Text style={[styles.label, { color: palette.subText }]}>Modello Audio</Text>
-                <TextInput
-                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
-                  value={whisperModel} onChangeText={setWhisperModel}
-                  placeholderTextColor={palette.subText} autoCapitalize="none"
-                />
-
-                <Text style={[styles.label, { color: palette.subText }]}>Modello Testo</Text>
-                <TextInput
-                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
-                  value={llamaModel} onChangeText={setLlamaModel}
-                  placeholderTextColor={palette.subText} autoCapitalize="none"
-                />
-              </>
-            ) : (
-              <>
-                <Text style={[styles.label, { color: palette.subText }]}>API Key Gemini</Text>
-                <TextInput
-                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
-                  value={geminiKey} onChangeText={setGeminiKey} placeholder="AIza..."
-                  placeholderTextColor={palette.subText} secureTextEntry
-                />
-
-                <Text style={[styles.label, { color: palette.subText }]}>Modello Gemini</Text>
-                <TextInput
-                  style={[styles.input, { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder }]}
-                  value={geminiModel} onChangeText={setGeminiModel}
-                  placeholderTextColor={palette.subText} autoCapitalize="none"
-                />
-
-                <View style={[styles.rowBetween, { marginTop: 18 }]}>
-                  <View style={{ flex: 1, paddingRight: 12 }}>
-                    <Text style={[styles.label, { color: palette.subText, marginTop: 0 }]}>
-                      Trascrizione smart
-                    </Text>
-                    <Text style={[styles.hint, { color: palette.subText, marginTop: 0 }]}>
-                      Rimuove esitazioni, corregge la grammatica e applica le
-                      autocorrezioni di chi parla.
-                    </Text>
-                  </View>
-                  <Switch
-                    value={geminiSmart}
-                    onValueChange={setGeminiSmart}
-                    trackColor={{ true: palette.accentSolid, false: palette.glassBorder }}
-                  />
-                </View>
-
-                <Text style={[styles.label, { color: palette.subText }]}>Lingua</Text>
-                <View style={[styles.segment, { borderColor: palette.glassBorder }]}>
-                  {([
-                    { id: 'auto', label: 'Rileva' },
-                    { id: 'it-IT', label: 'Italiano' },
-                  ]).map(opt => {
-                    const active = geminiLang === opt.id;
-                    return (
-                      <TouchableOpacity
-                        key={opt.id}
-                        onPress={() => setGeminiLang(opt.id)}
-                        activeOpacity={0.8}
-                        style={[styles.segmentItem, active && { backgroundColor: palette.accentSolid }]}
-                      >
-                        <Text style={{
-                          color: active ? '#fff' : palette.subText,
-                          fontWeight: '700',
-                          fontSize: 13,
-                        }}>
-                          {opt.label}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-
-                <Text style={[styles.label, { color: palette.subText }]}>Vocabolario personalizzato</Text>
-                <TextInput
-                  style={[
-                    styles.input,
-                    styles.inputMultiline,
-                    { backgroundColor: palette.inputBg, color: palette.text, borderColor: palette.glassBorder },
-                  ]}
-                  value={geminiVocab} onChangeText={setGeminiVocab}
-                  placeholder="Nomi, termini tecnici... separati da virgola"
-                  placeholderTextColor={palette.subText}
-                  autoCapitalize="none" multiline
-                />
-                <Text style={[styles.hint, { color: palette.subText }]}>
-                  Nomi propri e termini che il modello sbaglia spesso. Fino a
-                  1000, ma si rende al meglio con un centinaio.
-                </Text>
-              </>
-            )}
-
-            <TouchableOpacity onPress={resetSettings} style={{ marginTop: 6, marginBottom: 22 }}>
-              <Text style={{ color: palette.accent, textAlign: 'right', fontWeight: '600' }}>Ripristina Default</Text>
-            </TouchableOpacity>
-
-            <View style={styles.rowBetween}>
-              <TouchableOpacity onPress={() => setViewMode('history')} style={styles.ghostButton}>
-                <Text style={{ color: palette.subText, fontWeight: '600' }}>Annulla</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={saveSettings} style={[styles.primaryButton, { backgroundColor: palette.accentSolid }]}>
-                <Text style={styles.primaryButtonText}>Salva</Text>
-              </TouchableOpacity>
-            </View>
-          </ScrollView>
-        </GlassSurface>
-      </View>
-    </View>
-  );
+  const deleteLocalModel = () => {
+    Alert.alert('Eliminare il modello?', 'Libererai lo spazio sul telefono. Potrai riscaricarlo quando vuoi.', [
+      { text: 'Annulla', style: 'cancel' },
+      { text: 'Elimina', style: 'destructive', onPress: async () => {
+        await LocalAsr.deleteModel();
+        refreshLocalStatus();
+      } },
+    ]);
+  };
 
   // ===================================================================
-  //  RENDER: LETTORE (bottom sheet in vetro)
+  //  DATI DERIVATI
   // ===================================================================
-  const renderReader = () => (
-    <View style={styles.fill}>
-      <AuroraBackground palette={palette} />
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} backgroundColor="transparent" translucent />
-      <View style={styles.bottomSheetWrap}>
-        <TouchableOpacity activeOpacity={1} style={styles.flexTap} onPress={() => setViewMode('history')} />
+  const sections = useMemo(() => {
+    const groups: { title: string; data: Item[] }[] = [];
+    for (const item of history) {
+      const title = dayLabel(itemTs(item));
+      const last = groups[groups.length - 1];
+      if (last && last.title === title) last.data.push(item);
+      else groups.push({ title, data: [item] });
+    }
+    return groups;
+  }, [history]);
 
-        <GlassSurface palette={palette} strong radius={32} style={[styles.sheetCard, { paddingBottom: insets.bottom + 24 }]}>
-          <View style={styles.sheetInner}>
-            <View style={[styles.grabber, { backgroundColor: palette.glassBorder }]} />
-
-            <View style={styles.sheetHeader}>
-              <Text style={[styles.title, { color: palette.text }]}>Trascrizione</Text>
-              <View style={styles.headerActions}>
-                {!loading && (
-                  <TouchableOpacity onPress={() => copyText(transcription)} style={[styles.pill, { borderColor: palette.glassBorder }]}>
-                    <Text style={{ color: palette.accent, fontWeight: '700', fontSize: 12 }}>COPIA</Text>
-                  </TouchableOpacity>
-                )}
-                <TouchableOpacity onPress={() => setViewMode('history')} style={[styles.iconPill, { borderColor: palette.glassBorder }]}>
-                  <Text style={{ color: palette.text, fontSize: 15, fontWeight: '700' }}>✕</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {loading ? (
-              <View style={styles.centerContent}>
-                <ActivityIndicator size="large" color={palette.accent} />
-                <Text style={{ marginTop: 16, color: palette.subText, textAlign: 'center' }}>{transcription}</Text>
-              </View>
-            ) : (
-              <ScrollView contentContainerStyle={{ paddingBottom: 30 }} showsVerticalScrollIndicator={false}>
-                <Text style={[styles.resultText, { color: palette.text }]} selectable>{transcription}</Text>
-              </ScrollView>
-            )}
-          </View>
-        </GlassSurface>
-      </View>
-    </View>
-  );
+  const engineMeta = (e?: Engine) => (e ? ENGINE_LABELS[e].name : '');
 
   // ===================================================================
-  //  RENDER: CRONOLOGIA (schermata principale)
+  //  SCHERMATA: CRONOLOGIA
   // ===================================================================
   const renderHistory = () => (
-    <View style={styles.fill}>
-      <AuroraBackground palette={palette} />
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} backgroundColor="transparent" translucent />
-
-      <View style={[styles.historyContainer, { paddingTop: insets.top + 16 }]}>
-        <View style={styles.mainHeaderRow}>
-          <View>
-            <Text style={[styles.brand, { color: palette.text }]}>AudioScribe</Text>
-            <Text style={[styles.brandSub, { color: palette.subText }]}>
-              {(history.length > 0
-                ? `${history.length} trascrizion${history.length === 1 ? 'e' : 'i'}`
-                : 'Pronto a trascrivere')
-                + ` · ${provider === 'gemini' ? 'Gemini' : 'Groq'}`}
+    <View style={[styles.fill, { backgroundColor: theme.bg }]}>
+      <SectionList
+        sections={sections}
+        keyExtractor={item => item.id}
+        stickySectionHeadersEnabled={false}
+        contentContainerStyle={{ paddingTop: insets.top + 14, paddingHorizontal: 20, paddingBottom: insets.bottom + 120 }}
+        showsVerticalScrollIndicator={false}
+        ListHeaderComponent={
+          <View style={{ marginBottom: 8 }}>
+            <View style={styles.rowBetween}>
+              <Text style={[styles.eyebrow, { color: theme.muted }]}>{todayEyebrow()}</Text>
+              <RoundButton theme={theme} label="Impostazioni" onPress={() => setViewMode('settings')}>
+                <SlidersIcon color={theme.ink} />
+              </RoundButton>
+            </View>
+            <Text style={[styles.wordmark, { color: theme.ink }]}>
+              Audio<Text style={{ fontFamily: font.displayItalic, color: theme.accent }}>Scribe</Text>
             </Text>
+            <View style={[styles.rowStart, { marginTop: 10 }]}>
+              <Waveform color={theme.accent} height={14} bars={7} width={2.5} gap={2.5} />
+              <Text style={[styles.subline, { color: theme.inkSoft }]}>
+                {history.length === 0
+                  ? 'Nessuna trascrizione'
+                  : `${history.length} trascrizion${history.length === 1 ? 'e' : 'i'}`}
+                <Text style={{ color: theme.muted }}>{'  ·  '}{ENGINE_LABELS[provider].name}</Text>
+              </Text>
+            </View>
           </View>
-          <View style={styles.headerActions}>
-            {history.length > 0 && (
-              <TouchableOpacity onPress={clearAllHistory} style={[styles.iconPill, { borderColor: palette.glassBorder }]}>
-                <Text style={{ fontSize: 17 }}>🗑️</Text>
+        }
+        renderSectionHeader={({ section }) => (
+          <View style={styles.dayHeader}>
+            <Text style={[styles.dayTitle, { color: theme.ink }]}>{section.title}</Text>
+            <View style={[styles.hairline, { backgroundColor: theme.line }]} />
+          </View>
+        )}
+        renderItem={({ item }) => (
+          <TouchableOpacity
+            activeOpacity={0.75}
+            onPress={() => { setCurrent(item); setError(''); setLoading(false); setViewMode('reader'); }}
+            style={[styles.note, { backgroundColor: theme.surface, borderColor: theme.line }]}
+          >
+            <View style={styles.rowBetween}>
+              <Text style={[styles.noteTime, { color: theme.ink }]}>{timeLabel(itemTs(item))}</Text>
+              {item.engine ? (
+                <Text style={[styles.tag, { color: theme.muted, borderColor: theme.line }]}>
+                  {engineMeta(item.engine)}
+                </Text>
+              ) : null}
+            </View>
+            <Text style={[styles.noteText, { color: theme.inkSoft }]} numberOfLines={4}>{item.text}</Text>
+            <View style={[styles.noteActions, { borderTopColor: theme.line }]}>
+              <TouchableOpacity onPress={() => copyText(item.text)} hitSlop={8}>
+                <Text style={[styles.action, { color: theme.accent }]}>Copia</Text>
               </TouchableOpacity>
-            )}
-            <TouchableOpacity onPress={() => setViewMode('settings')} style={[styles.iconPill, { borderColor: palette.glassBorder }]}>
-              <Text style={{ fontSize: 18 }}>⚙️</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        <FlatList
-          data={history}
-          keyExtractor={item => item.id}
-          contentContainerStyle={{ paddingBottom: insets.bottom + 110 }}
-          showsVerticalScrollIndicator={false}
-          ListEmptyComponent={
-            <GlassSurface palette={palette} style={styles.emptyCard}>
-              <View style={styles.emptyInner}>
-                <Text style={styles.emptyEmoji}>🎙️</Text>
-                <Text style={[styles.emptyTitle, { color: palette.text }]}>Nessuna trascrizione</Text>
-                <Text style={[styles.emptyText, { color: palette.subText }]}>
-                  Tocca "Ultimo vocale" qui sotto, oppure condividi un messaggio
-                  vocale da WhatsApp verso AudioScribe.
+              <TouchableOpacity onPress={() => shareText(item.text)} hitSlop={8}>
+                <Text style={[styles.action, { color: theme.ink }]}>Condividi</Text>
+              </TouchableOpacity>
+              <View style={styles.fill} />
+              <TouchableOpacity onPress={() => deleteItem(item.id)} hitSlop={8}>
+                <Text style={[styles.action, { color: theme.muted }]}>Elimina</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        )}
+        ListEmptyComponent={
+          <View style={{ marginTop: 40 }}>
+            <Text style={[styles.emptyQuote, { color: theme.ink }]}>
+              Ogni vocale,{'\n'}<Text style={{ color: theme.accent }}>nero su bianco.</Text>
+            </Text>
+            {[
+              ['Condividi', 'un vocale da WhatsApp verso AudioScribe.'],
+              ['Oppure tocca', '"Ultimo vocale" qui sotto: lo trova da solo.'],
+              ['Rileggi', 'tutto qui, raccolto giorno per giorno.'],
+            ].map(([strong, rest], i) => (
+              <View key={i} style={styles.step}>
+                <Text style={[styles.stepNum, { color: theme.accent }]}>{`0${i + 1}`}</Text>
+                <Text style={[styles.stepText, { color: theme.inkSoft }]}>
+                  <Text style={{ fontFamily: font.bold, color: theme.ink }}>{strong} </Text>{rest}
                 </Text>
               </View>
-            </GlassSurface>
-          }
-          renderItem={({ item }) => (
-            <GlassSurface palette={palette} style={styles.historyItem}>
-              <TouchableOpacity
-                activeOpacity={0.7}
-                style={styles.historyItemInner}
-                onPress={() => { setTranscription(item.text); setViewMode('reader'); }}
-              >
-                <View style={styles.rowBetween}>
-                  <Text style={[styles.historyDate, { color: palette.subText }]}>{item.date}</Text>
-                  <View style={styles.headerActions}>
-                    <TouchableOpacity onPress={() => copyText(item.text)}>
-                      <Text style={{ color: palette.accent, fontSize: 12, fontWeight: '700' }}>COPIA</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={() => deleteItem(item.id)}>
-                      <Text style={{ color: palette.danger, fontSize: 12, fontWeight: '700' }}>ELIMINA</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-                <Text style={[styles.historyText, { color: palette.text }]} numberOfLines={3}>{item.text}</Text>
-              </TouchableOpacity>
-            </GlassSurface>
-          )}
+            ))}
+          </View>
+        }
+      />
+
+      <View style={[styles.dock, { paddingBottom: insets.bottom + 16, backgroundColor: theme.bg, borderTopColor: theme.line }]}>
+        <Button
+          theme={theme}
+          kind="ink"
+          label="Trascrivi ultimo vocale"
+          onPress={transcribeLatest}
+          left={<Waveform color={theme.accent} height={16} bars={5} width={3} gap={2.5} />}
         />
       </View>
+    </View>
+  );
 
-      {/* FAB informativo per la prossima trascrizione */}
-      <TouchableOpacity
-        activeOpacity={0.85}
-        onPress={transcribeLatest}
-        style={[styles.fab, { bottom: insets.bottom + 24 }]}
-      >
-        <GlassSurface palette={palette} strong radius={30} style={styles.fabGlass}>
-          <View style={styles.fabInner}>
-            <Text style={[styles.fabText, { color: palette.text }]}>🎙️  Ultimo vocale</Text>
+  // ===================================================================
+  //  SCHERMATA: LETTORE (anche durante la trascrizione)
+  // ===================================================================
+  const renderReader = () => {
+    const inHistory = current && history.some(h => h.id === current.id);
+    return (
+      <View style={[styles.fill, { backgroundColor: theme.surface }]}>
+        <View style={[styles.readerTop, { paddingTop: insets.top + 12, borderBottomColor: theme.line }]}>
+          <RoundButton theme={theme} label="Indietro" onPress={() => setViewMode('history')}>
+            <BackIcon color={theme.ink} />
+          </RoundButton>
+          <Text style={[styles.eyebrow, { color: theme.muted }]}>
+            {loading ? 'IN CORSO' : error ? 'ERRORE' : 'TRASCRIZIONE'}
+          </Text>
+          <View style={{ width: 44 }} />
+        </View>
+
+        {loading ? (
+          <View style={styles.center}>
+            <AnimatedWaveform color={theme.accent} />
+            <Text style={[styles.statusText, { color: theme.ink }]}>{status}</Text>
+            <Text style={[styles.statusSub, { color: theme.muted }]}>
+              {provider === 'local' ? 'Sul dispositivo, senza connessione' : 'Può volerci qualche secondo'}
+            </Text>
           </View>
-        </GlassSurface>
-      </TouchableOpacity>
+        ) : error ? (
+          <View style={[styles.center, { paddingHorizontal: 32 }]}>
+            <Text style={[styles.errorTitle, { color: theme.ink }]}>Qualcosa è andato storto</Text>
+            <Text style={[styles.errorText, { color: theme.inkSoft }]} selectable>{error}</Text>
+            <Button theme={theme} kind="outline" label="Torna alle trascrizioni" onPress={() => setViewMode('history')} style={{ marginTop: 24 }} />
+          </View>
+        ) : current ? (
+          <>
+            <ScrollView contentContainerStyle={{ paddingHorizontal: 26, paddingTop: 26, paddingBottom: 40 }}>
+              <Text style={[styles.readerMeta, { color: theme.muted }]}>
+                {dayLabel(itemTs(current))}{'  ·  '}{timeLabel(itemTs(current))}
+                {current.engine ? `  ·  ${ENGINE_LABELS[current.engine].name} — ${ENGINE_LABELS[current.engine].tag}` : ''}
+              </Text>
+              <View style={[styles.accentRule, { backgroundColor: theme.accent }]} />
+              <Text style={[styles.readerText, { color: theme.ink }]} selectable>{current.text}</Text>
+            </ScrollView>
+            <View style={[styles.readerBar, { paddingBottom: insets.bottom + 14, borderTopColor: theme.line, backgroundColor: theme.surface }]}>
+              <Button theme={theme} kind="ink" label="Copia" onPress={() => copyText(current.text)} style={styles.fill} />
+              <Button theme={theme} kind="outline" label="Condividi" onPress={() => shareText(current.text)} style={styles.fill} />
+              {inHistory ? (
+                <Button theme={theme} kind="danger" label="Elimina" onPress={() => deleteItem(current.id)} style={{ paddingHorizontal: 12 }} />
+              ) : null}
+            </View>
+          </>
+        ) : null}
+      </View>
+    );
+  };
+
+  // ===================================================================
+  //  SCHERMATA: IMPOSTAZIONI (resa inline -> i TextInput tengono il focus)
+  // ===================================================================
+  const renderLocalCard = () => {
+    if (!LocalAsr) {
+      return <Text style={[styles.body, { color: theme.muted, marginTop: 14 }]}>Non disponibile su questo dispositivo.</Text>;
+    }
+    const total = localStatus?.totalBytes || download.total;
+    const installed = !!localStatus?.installed;
+    const partial = !installed && (localStatus?.downloadedBytes || 0) > 0;
+    return (
+      <View style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.line }]}>
+        <View style={styles.rowBetween}>
+          <View style={styles.fill}>
+            <Text style={[styles.cardTitle, { color: theme.ink }]}>Parakeet Ultra</Text>
+            <Text style={[styles.cardSub, { color: theme.muted }]}>moondream · 600M parametri · int8</Text>
+          </View>
+          <Text style={[
+            styles.badge,
+            installed
+              ? { color: theme.teal, borderColor: theme.teal }
+              : { color: theme.muted, borderColor: theme.line },
+          ]}>
+            {installed ? 'Pronto' : downloading ? 'In download' : 'Da scaricare'}
+          </Text>
+        </View>
+
+        <Text style={[styles.body, { color: theme.inkSoft, marginTop: 12 }]}>
+          Trascrive sul telefono, senza connessione e senza che l'audio esca dal dispositivo.
+          Supporta l'italiano e altre 24 lingue europee.
+        </Text>
+
+        {downloading ? (
+          <View style={{ marginTop: 18 }}>
+            <ProgressBar theme={theme} value={download.received / (download.total || 1)} />
+            <View style={[styles.rowBetween, { marginTop: 8 }]}>
+              <Text style={[styles.cardSub, { color: theme.inkSoft }]}>{download.label || 'Download…'}</Text>
+              <Text style={[styles.cardSub, { color: theme.ink, fontFamily: font.bold }]}>
+                {formatBytes(download.received)} / {formatBytes(download.total)}
+              </Text>
+            </View>
+            <Button theme={theme} kind="ghost" label="Annulla" onPress={() => LocalAsr.cancelDownload()} style={{ marginTop: 6 }} />
+          </View>
+        ) : installed ? (
+          <View style={[styles.rowBetween, { marginTop: 16 }]}>
+            <Text style={[styles.cardSub, { color: theme.inkSoft }]}>{formatBytes(total)} occupati sul telefono</Text>
+            <Button theme={theme} kind="danger" label="Elimina" onPress={deleteLocalModel} style={{ minHeight: 40, paddingHorizontal: 8 }} />
+          </View>
+        ) : (
+          <Button
+            theme={theme}
+            kind="accent"
+            label={partial ? `Riprendi download · ${formatBytes(total)}` : `Scarica modello · ${formatBytes(total)}`}
+            onPress={startDownload}
+            style={{ marginTop: 18 }}
+          />
+        )}
+      </View>
+    );
+  };
+
+  const renderSettings = () => (
+    <View style={[styles.fill, { backgroundColor: theme.bg }]}>
+      <ScrollView
+        contentContainerStyle={{ paddingTop: insets.top + 12, paddingHorizontal: 20, paddingBottom: insets.bottom + 40 }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={styles.rowStart}>
+          <RoundButton theme={theme} label="Indietro" onPress={() => setViewMode('history')}>
+            <BackIcon color={theme.ink} />
+          </RoundButton>
+        </View>
+        <Text style={[styles.screenTitle, { color: theme.ink }]}>Impostazioni</Text>
+
+        <SectionTitle theme={theme} number="01" title="Motore" />
+        <Text style={[styles.body, { color: theme.muted, marginBottom: 14 }]}>
+          Chi trasforma la voce in testo.
+        </Text>
+        <Segmented<Engine>
+          theme={theme}
+          value={provider}
+          onChange={setProvider}
+          options={[
+            { id: 'groq', label: 'Groq', sub: 'cloud' },
+            { id: 'gemini', label: 'Gemini', sub: 'cloud' },
+            { id: 'local', label: 'Locale', sub: 'offline' },
+          ]}
+        />
+        <Text style={[styles.hint, { color: theme.inkSoft }]}>
+          {{
+            groq: 'Whisper trascrive, poi un modello linguistico aggiunge punteggiatura e paragrafi.',
+            gemini: 'Gemini 3.5 Transcribe trascrive e formatta in un solo passaggio.',
+            local: 'Parakeet Ultra gira sul telefono: niente rete, niente chiavi, privacy totale.',
+          }[provider]}
+        </Text>
+
+        <SectionTitle theme={theme} number="02" title={ENGINE_LABELS[provider].name} />
+
+        {provider === 'groq' && (
+          <>
+            <Field theme={theme} label="API key Groq" value={apiKey} onChangeText={setApiKey} placeholder="gsk_…" secureTextEntry />
+            <Field theme={theme} label="Modello audio" value={whisperModel} onChangeText={setWhisperModel} />
+            <Field theme={theme} label="Modello testo" value={llamaModel} onChangeText={setLlamaModel} />
+          </>
+        )}
+
+        {provider === 'gemini' && (
+          <>
+            <Field theme={theme} label="API key Gemini" value={geminiKey} onChangeText={setGeminiKey} placeholder="AIza…" secureTextEntry hint="Si crea gratis su Google AI Studio." />
+            <Field theme={theme} label="Modello" value={geminiModel} onChangeText={setGeminiModel} />
+
+            <View style={[styles.switchRow, { borderColor: theme.line, backgroundColor: theme.surface }]}>
+              <View style={[styles.fill, { paddingRight: 12 }]}>
+                <Text style={[styles.cardTitleSmall, { color: theme.ink }]}>Trascrizione smart</Text>
+                <Text style={[styles.cardSub, { color: theme.muted, marginTop: 3 }]}>
+                  Toglie esitazioni, corregge la grammatica e applica le autocorrezioni di chi parla.
+                </Text>
+              </View>
+              <Switch
+                value={geminiSmart}
+                onValueChange={setGeminiSmart}
+                trackColor={{ true: theme.accent, false: theme.line }}
+                thumbColor={theme.surface}
+              />
+            </View>
+
+            <Text style={[styles.fieldLabel, { color: theme.muted, marginTop: 18 }]}>Lingua</Text>
+            <Segmented<string>
+              theme={theme}
+              value={geminiLang}
+              onChange={setGeminiLang}
+              options={[{ id: 'auto', label: 'Rileva' }, { id: 'it-IT', label: 'Italiano' }]}
+            />
+            <Field
+              theme={theme}
+              label="Vocabolario personalizzato"
+              value={geminiVocab}
+              onChangeText={setGeminiVocab}
+              placeholder="Nomi, termini tecnici… separati da virgola"
+              multiline
+              hint="Fino a 1000 termini, ma rende al meglio con un centinaio."
+            />
+          </>
+        )}
+
+        {provider === 'local' && renderLocalCard()}
+
+        <SectionTitle theme={theme} number="03" title="Cronologia" />
+        <Text style={[styles.body, { color: theme.muted }]}>
+          {history.length} trascrizion{history.length === 1 ? 'e salvata' : 'i salvate'} sul telefono.
+        </Text>
+        {history.length > 0 && (
+          <Button theme={theme} kind="danger" label="Elimina tutte le trascrizioni" onPress={clearAllHistory} style={{ alignSelf: 'flex-start', paddingHorizontal: 0, marginTop: 4 }} />
+        )}
+
+        <Button theme={theme} kind="ink" label="Salva" onPress={saveSettings} style={{ marginTop: 36 }} />
+        <Button theme={theme} kind="ghost" label="Ripristina modelli predefiniti" onPress={resetSettings} style={{ marginTop: 6 }} />
+      </ScrollView>
     </View>
   );
 
   // --- MAIN RENDER ---
-  if (viewMode === 'settings') return renderSettings();
-  if (viewMode === 'overlay' || viewMode === 'reader') return renderReader();
-  return renderHistory();
+  return (
+    <>
+      <StatusBar barStyle={theme.statusBar} backgroundColor={viewMode === 'reader' ? theme.surface : theme.bg} />
+      {viewMode === 'settings' ? renderSettings() : viewMode === 'reader' ? renderReader() : renderHistory()}
+    </>
+  );
 };
 
 const App = () => (
@@ -826,70 +638,64 @@ const App = () => (
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  flexTap: { flex: 1 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingBottom: 40 },
+  rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  rowStart: { flexDirection: 'row', alignItems: 'center', gap: 10 },
 
-  // Aurora
-  blob: { position: 'absolute', width: 320, height: 320, borderRadius: 160, opacity: 0.55 },
-  blobSmall: { position: 'absolute', width: 220, height: 220, borderRadius: 110, opacity: 0.45 },
+  eyebrow: { fontFamily: font.bold, fontSize: 11, letterSpacing: 2 },
+  wordmark: { fontFamily: font.display, fontSize: 52, lineHeight: 60, letterSpacing: -1.5, marginTop: 18 },
+  subline: { fontFamily: font.semibold, fontSize: 14 },
+  screenTitle: { fontFamily: font.display, fontSize: 40, lineHeight: 48, letterSpacing: -1, marginTop: 18 },
 
-  // Glass
-  topHighlight: { position: 'absolute', top: 0, left: 0, right: 0, height: 1.5 },
+  dayHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 26, marginBottom: 12 },
+  dayTitle: { fontFamily: font.serifItalic, fontSize: 19 },
+  hairline: { flex: 1, height: StyleSheet.hairlineWidth },
 
-  // Header
-  historyContainer: { flex: 1, paddingHorizontal: 18 },
-  mainHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 22 },
-  brand: { fontSize: 30, fontWeight: '800', letterSpacing: 0.3 },
-  brandSub: { fontSize: 13, marginTop: 2, fontWeight: '500' },
-  headerActions: { flexDirection: 'row', gap: 12, alignItems: 'center' },
+  note: { borderWidth: 1, borderRadius: 22, padding: 18, marginBottom: 12 },
+  noteTime: { fontFamily: font.bold, fontSize: 13, letterSpacing: 0.5 },
+  tag: {
+    fontFamily: font.bold, fontSize: 10, letterSpacing: 1.2, textTransform: 'uppercase',
+    borderWidth: 1, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, overflow: 'hidden',
+  },
+  noteText: { fontFamily: font.serif, fontSize: 17, lineHeight: 26, marginTop: 10 },
+  noteActions: {
+    flexDirection: 'row', alignItems: 'center', gap: 20, marginTop: 14, paddingTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  action: { fontFamily: font.bold, fontSize: 13 },
 
-  // Pills / buttons
-  iconPill: { width: 42, height: 42, borderRadius: 21, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  pill: { paddingHorizontal: 14, height: 34, borderRadius: 17, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  primaryButton: { paddingVertical: 12, paddingHorizontal: 26, borderRadius: 14 },
-  primaryButtonText: { color: '#fff', fontWeight: '700' },
-  ghostButton: { paddingVertical: 12, paddingHorizontal: 22, borderRadius: 14 },
+  emptyQuote: { fontFamily: font.display, fontSize: 34, lineHeight: 42, letterSpacing: -0.5, marginBottom: 26 },
+  step: { flexDirection: 'row', gap: 14, marginBottom: 14, alignItems: 'baseline' },
+  stepNum: { fontFamily: font.serifItalic, fontSize: 16, width: 24 },
+  stepText: { flex: 1, fontFamily: font.body, fontSize: 15, lineHeight: 22 },
 
-  // History items
-  historyItem: { marginBottom: 14 },
-  historyItemInner: { padding: 16 },
-  historyDate: { fontSize: 12, fontWeight: '600' },
-  historyText: { fontSize: 14, lineHeight: 21, marginTop: 10 },
-  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  dock: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 20, paddingTop: 14, borderTopWidth: StyleSheet.hairlineWidth },
 
-  // Empty
-  emptyCard: { marginTop: 40 },
-  emptyInner: { padding: 30, alignItems: 'center' },
-  emptyEmoji: { fontSize: 40, marginBottom: 14 },
-  emptyTitle: { fontSize: 18, fontWeight: '700', marginBottom: 8 },
-  emptyText: { fontSize: 14, lineHeight: 21, textAlign: 'center' },
+  readerTop: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingBottom: 12, borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  readerMeta: { fontFamily: font.semibold, fontSize: 12.5, letterSpacing: 0.3 },
+  accentRule: { width: 36, height: 3, borderRadius: 2, marginTop: 16, marginBottom: 22 },
+  readerText: { fontFamily: font.serif, fontSize: 20, lineHeight: 32 },
+  readerBar: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, paddingTop: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  statusText: { fontFamily: font.serifItalic, fontSize: 20, marginTop: 28, textAlign: 'center', paddingHorizontal: 30 },
+  statusSub: { fontFamily: font.medium, fontSize: 13, marginTop: 8 },
+  errorTitle: { fontFamily: font.display, fontSize: 26, textAlign: 'center' },
+  errorText: { fontFamily: font.body, fontSize: 14, lineHeight: 21, textAlign: 'center', marginTop: 12 },
 
-  // Reader bottom sheet
-  bottomSheetWrap: { flex: 1, justifyContent: 'flex-end' },
-  sheetCard: { height: '78%', width: '100%', borderBottomWidth: 0 },
-  sheetInner: { flex: 1, paddingHorizontal: 22, paddingTop: 12 },
-  grabber: { width: 44, height: 5, borderRadius: 3, alignSelf: 'center', marginBottom: 16 },
-  sheetHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 },
-  title: { fontSize: 20, fontWeight: '800' },
-  centerContent: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingBottom: 60 },
-  resultText: { fontSize: 16, lineHeight: 25 },
-
-  // Settings
-  centeredOverlay: { flex: 1, justifyContent: 'center', paddingHorizontal: 18 },
-  settingsCard: { width: '100%', maxHeight: '90%' },
-  settingsScroll: { width: '100%' },
-  settingsInner: { padding: 24 },
-  label: { fontSize: 12, fontWeight: '700', marginTop: 12, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
-  input: { padding: 13, borderRadius: 12, fontSize: 16, borderWidth: 1 },
-  inputMultiline: { minHeight: 76, textAlignVertical: 'top' },
-  hint: { fontSize: 12, lineHeight: 17, marginTop: 8 },
-  segment: { flexDirection: 'row', borderRadius: 12, borderWidth: 1, overflow: 'hidden' },
-  segmentItem: { flex: 1, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
-
-  // FAB
-  fab: { position: 'absolute', right: 18 },
-  fabGlass: {},
-  fabInner: { paddingVertical: 14, paddingHorizontal: 22 },
-  fabText: { fontSize: 15, fontWeight: '700' },
+  body: { fontFamily: font.body, fontSize: 14.5, lineHeight: 21 },
+  hint: { fontFamily: font.body, fontSize: 13, lineHeight: 19, marginTop: 12 },
+  fieldLabel: { fontFamily: font.bold, fontSize: 11, letterSpacing: 1.4, textTransform: 'uppercase', marginBottom: 8 },
+  card: { borderWidth: 1, borderRadius: 22, padding: 18, marginTop: 14 },
+  cardTitle: { fontFamily: font.display, fontSize: 20 },
+  cardTitleSmall: { fontFamily: font.bold, fontSize: 15 },
+  cardSub: { fontFamily: font.medium, fontSize: 12.5, lineHeight: 18 },
+  badge: {
+    fontFamily: font.bold, fontSize: 10.5, letterSpacing: 1, textTransform: 'uppercase',
+    borderWidth: 1, borderRadius: 10, paddingHorizontal: 9, paddingVertical: 4, overflow: 'hidden',
+  },
+  switchRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderRadius: 18, padding: 16, marginTop: 18 },
 });
 
 export default App;

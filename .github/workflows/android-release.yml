@@ -43,6 +43,10 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # Il default ("tools platform-tools") fallisce: il pacchetto legacy
+          # "tools" non esiste piu nel repository dell'SDK.
+          packages: 'platform-tools'
 
       - name: Install NDK and CMake
         run: |

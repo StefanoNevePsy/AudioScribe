@@ -6,10 +6,6 @@ jest.mock('react-native-share-menu', () => ({
   addNewShareListener: jest.fn(() => ({ remove: jest.fn() })),
 }));
 
-jest.mock('@react-native-community/blur', () => ({
-  BlurView: 'BlurView',
-}));
-
 jest.mock('@react-native-clipboard/clipboard', () => ({
   setString: jest.fn(),
 }));
