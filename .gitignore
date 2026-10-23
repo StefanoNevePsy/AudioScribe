@@ -32,3 +32,4 @@ metro.config.js.bak
 .env
 *.log
 coverage/
+AudioScribeGlass.apk
