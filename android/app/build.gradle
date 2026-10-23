@@ -56,6 +56,10 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
+    // Trascrizione locale (Parakeet Ultra). Include gli operatori contrib come
+    // MatMulNBits usati dall'encoder quantizzato int8.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
+
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")
     } else {

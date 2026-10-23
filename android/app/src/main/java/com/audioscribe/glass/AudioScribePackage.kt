@@ -7,26 +7,33 @@ import com.facebook.react.module.model.ReactModuleInfo
 import com.facebook.react.module.model.ReactModuleInfoProvider
 
 /**
- * Registra AudioScribeModule. Usa BaseReactPackage (API non deprecata,
+ * Registra i moduli nativi dell'app. Usa BaseReactPackage (API non deprecata,
  * compatibile con la new architecture / bridgeless).
  */
 class AudioScribePackage : BaseReactPackage() {
 
   override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? =
-    if (name == AudioScribeModule.NAME) AudioScribeModule(reactContext) else null
+    when (name) {
+      AudioScribeModule.NAME -> AudioScribeModule(reactContext)
+      LocalAsrModule.NAME -> LocalAsrModule(reactContext)
+      else -> null
+    }
 
   override fun getReactModuleInfoProvider(): ReactModuleInfoProvider =
     ReactModuleInfoProvider {
       mapOf(
-        AudioScribeModule.NAME to
-          ReactModuleInfo(
-            AudioScribeModule.NAME,
-            AudioScribeModule::class.java.name,
-            false, // canOverrideExistingModule
-            false, // needsEagerInit
-            false, // isCxxModule
-            false, // isTurboModule
-          ),
+        AudioScribeModule.NAME to info(AudioScribeModule.NAME, AudioScribeModule::class.java.name),
+        LocalAsrModule.NAME to info(LocalAsrModule.NAME, LocalAsrModule::class.java.name),
       )
     }
+
+  private fun info(name: String, className: String) =
+    ReactModuleInfo(
+      name,
+      className,
+      false, // canOverrideExistingModule
+      false, // needsEagerInit
+      false, // isCxxModule
+      false, // isTurboModule
+    )
 }
