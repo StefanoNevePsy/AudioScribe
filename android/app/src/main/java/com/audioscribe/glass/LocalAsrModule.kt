@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   audio -> PCM mono -> resample a 16 kHz -> nemo128 (log-mel) -> encoder
  *   -> decodifica greedy TDT con decoder_joint.
  *
- * L'audio viene diviso in blocchi da ~30 s tagliati nel punto piu silenzioso:
+ * L'audio viene diviso in blocchi da ~55 s tagliati nel punto piu silenzioso:
  * l'attenzione dell'encoder cresce col quadrato della durata (3 minuti in un
  * colpo solo superano i 3,5 GB di RAM).
  */
@@ -398,11 +398,11 @@ class LocalAsrModule(reactContext: ReactApplicationContext) :
     }
   }
 
-  /** Blocchi da ~30 s, tagliati nel tratto di 100 ms piu silenzioso entro +-5 s. */
+  /** Blocchi da ~55 s (max ~65 s, ~2 GB di picco), tagliati nel tratto di 100 ms piu silenzioso entro +-10 s. */
   private fun splitOnSilence(w: FloatArray): List<Pair<Int, Int>> {
     val sr = 16_000
-    val target = 30 * sr
-    val search = 5 * sr
+    val target = 55 * sr
+    val search = 10 * sr
     val win = sr / 10
     val cuts = ArrayList<Pair<Int, Int>>()
     var start = 0
